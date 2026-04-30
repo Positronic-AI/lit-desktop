@@ -94,8 +94,17 @@ export async function fetchAgents(): Promise<Agent[]> {
 }
 
 export async function fetchChannels(): Promise<Channel[]> {
-  const data = await apiFetch<{ channels: Channel[] }>("/channels/unread");
-  return data.channels;
+  const [nav, unread] = await Promise.all([
+    apiFetch<{ personal_channels: Array<{ id: string; name: string; folder_path?: string }> }>("/navigation"),
+    apiFetch<{ channels: Array<{ id: string; unreadCount: number }> }>("/channels/unread").catch(() => ({ channels: [] })),
+  ]);
+
+  const unreadMap = new Map(unread.channels.map(c => [c.id, c.unreadCount]));
+  return (nav.personal_channels || []).map(ch => ({
+    id: ch.id,
+    name: ch.name,
+    unreadCount: unreadMap.get(ch.id) || 0,
+  }));
 }
 
 export async function createChannel(name: string): Promise<{ id: string }> {
@@ -238,4 +247,15 @@ export async function cancelStream(streamId: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
   });
+}
+
+export async function uploadImage(file: File, channelId?: string): Promise<{ url: string; filename: string }> {
+  const formData = new FormData();
+  formData.append("file", file);
+  let url = `${currentServer.url}/mux/api/upload`;
+  if (channelId) url += `?channel_id=${encodeURIComponent(channelId)}`;
+  const res = await fetch(url, { method: "POST", body: formData });
+  if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+  const data = await res.json();
+  return { url: `${currentServer.url}/mux${data.url}`, filename: data.filename };
 }

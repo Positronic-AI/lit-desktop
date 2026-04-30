@@ -19,6 +19,7 @@ import {
   getInterrupt,
   fetchUsage,
   cancelStream,
+  uploadImage,
   getServer,
   type Agent,
   type Channel,
@@ -360,7 +361,8 @@ function renderToolCallEl(tool: ToolCall): HTMLDivElement {
 
   const summary = document.createElement("div");
   summary.className = "tool-summary";
-  summary.innerHTML = `<span class="tool-icon">${tool.iconSvg}</span><span class="tool-name">${escapeHtml(tool.name)}</span><span class="tool-param-preview">${escapeHtml(tool.paramPreview)}</span><span class="tool-expand-icon">${CHEVRON_SVG}</span>`;
+  const spinnerHtml = !tool.result ? `<span class="tool-spinner"></span>` : "";
+  summary.innerHTML = `<span class="tool-icon">${tool.iconSvg}</span><span class="tool-name">${escapeHtml(tool.name)}</span><span class="tool-param-preview">${escapeHtml(tool.paramPreview)}</span>${spinnerHtml}<span class="tool-expand-icon">${CHEVRON_SVG}</span>`;
   el.appendChild(summary);
 
   const details = document.createElement("div");
@@ -423,10 +425,18 @@ function renderToolGroupEl(group: ToolGroup): HTMLDivElement {
   }
   header.appendChild(iconsSpan);
 
+  const hasPending = group.tools.some(t => !t.result);
+
   const label = document.createElement("span");
   label.className = "tool-group-label";
   label.textContent = `${group.tools.length} action${group.tools.length !== 1 ? "s" : ""}`;
   header.appendChild(label);
+
+  if (hasPending) {
+    const spinner = document.createElement("span");
+    spinner.className = "tool-spinner";
+    header.appendChild(spinner);
+  }
 
   const toggle = document.createElement("span");
   toggle.className = "tool-group-toggle";
@@ -1204,6 +1214,7 @@ async function loadAgentThrottle(agent: Agent) {
 
 async function selectAgent(agent: Agent) {
   currentAgent = agent;
+  localStorage.setItem("lit-desktop-agent", agent.id);
   await loadAgentThrottle(agent);
   renderAgentTabs();
   renderAgentInfo();
@@ -1225,6 +1236,7 @@ async function loadChannelAgent(channelId: string) {
       const agent = agents.find((a) => a.id === agentId);
       if (agent) {
         currentAgent = agent;
+        localStorage.setItem("lit-desktop-agent", agent.id);
         renderAgentTabs();
         renderAgentInfo();
         return;
@@ -1274,9 +1286,8 @@ function renderSidebar(channels: Channel[]) {
   // Section header with add menu
   const header = document.createElement("div");
   header.className = "section-header";
-  header.innerHTML = `<span class="section-label">Channels</span><button class="icon-btn section-add-btn" title="Open folder">+</button><button class="icon-btn section-collapse-btn" title="Collapse sidebar">&#9664;</button>`;
+  header.innerHTML = `<span class="section-label">Channels</span><button class="icon-btn section-add-btn" title="Open folder">+</button>`;
   header.querySelector(".section-add-btn")!.addEventListener("click", handleOpenFolder);
-  header.querySelector(".section-collapse-btn")!.addEventListener("click", collapseSidebar);
   channelList.appendChild(header);
 
   for (const ch of channels) {
@@ -1421,14 +1432,22 @@ async function openChannel(channel: Channel) {
 function connectWebSocket(channelId: string) {
   channelWs = createChannelWebSocket(channelId);
 
+  channelWs.onopen = () => {
+    wsReconnectAttempt = 0;
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+    showConnectionStatus("connected");
+  };
+
   channelWs.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
 
       if (data.type === "new_messages" && Array.isArray(data.messages)) {
+        let added = false;
         for (const msg of data.messages) {
           if (knownMessageIds.has(msg.id)) continue;
           knownMessageIds.add(msg.id);
+          added = true;
           renderMessage({
             role: msg.direction === "in" ? "user" : "assistant",
             content: msg.content,
@@ -1438,6 +1457,9 @@ function connectWebSocket(channelId: string) {
             file_path: msg.file_path,
             metadata: msg.metadata,
           });
+        }
+        if (added && document.visibilityState === "visible") {
+          markChannelRead(channelId).catch(() => {});
         }
       } else if (data.id && data.content && data.direction) {
         if (!knownMessageIds.has(data.id)) {
@@ -1451,6 +1473,12 @@ function connectWebSocket(channelId: string) {
             file_path: data.file_path,
             metadata: data.metadata,
           });
+          if (streamingEl && data.direction === "in") {
+            messagesEl.appendChild(streamingEl);
+          }
+          if (document.visibilityState === "visible") {
+            markChannelRead(channelId).catch(() => {});
+          }
         }
       } else if (data.type === "stream_start") {
         streamingChannels.add(channelId);
@@ -1472,16 +1500,51 @@ function connectWebSocket(channelId: string) {
     }
   };
 
+  channelWs.onerror = () => {};
   channelWs.onclose = () => {
     if (currentChannel?.id === channelId) {
-      setTimeout(() => {
-        if (currentChannel?.id === channelId) {
-          connectWebSocket(channelId);
-        }
-      }, 3000);
+      wsReconnect(channelId);
     }
   };
 }
+
+let wsReconnectAttempt = 0;
+let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+function wsReconnect(channelId: string) {
+  if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+  wsReconnectAttempt++;
+  const delay = Math.min(1000 * Math.pow(1.5, wsReconnectAttempt - 1), 15000);
+  showConnectionStatus("reconnecting");
+  wsReconnectTimer = setTimeout(() => {
+    if (currentChannel?.id === channelId) {
+      connectWebSocket(channelId);
+    }
+  }, delay);
+}
+
+function showConnectionStatus(status: "connected" | "reconnecting") {
+  let indicator = document.getElementById("connection-status");
+  if (status === "connected") {
+    indicator?.remove();
+    return;
+  }
+  if (!indicator) {
+    indicator = document.createElement("div");
+    indicator.id = "connection-status";
+    document.getElementById("content-header")!.appendChild(indicator);
+  }
+  indicator.textContent = `Reconnecting...`;
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && currentChannel) {
+    markChannelRead(currentChannel.id).catch(() => {});
+    if (channelWs?.readyState !== WebSocket.OPEN) {
+      connectWebSocket(currentChannel.id);
+    }
+  }
+});
 
 // --- Streaming ---
 
@@ -1586,19 +1649,134 @@ async function deleteMessage(channelId: string, messageId: string, el: HTMLEleme
   }
 }
 
+// --- Image paste/upload ---
+
+const MAX_PENDING_IMAGES = 3;
+let pendingImageFiles: File[] = [];
+let pendingImageDataUrls: string[] = [];
+
+function renderPendingImages() {
+  let row = document.getElementById("pending-images-row");
+  if (pendingImageDataUrls.length === 0) {
+    row?.remove();
+    return;
+  }
+  if (!row) {
+    row = document.createElement("div");
+    row.id = "pending-images-row";
+    const inputRow = document.getElementById("input-row")!;
+    inputRow.parentElement!.insertBefore(row, inputRow);
+  }
+  row.innerHTML = "";
+  for (let i = 0; i < pendingImageDataUrls.length; i++) {
+    const wrap = document.createElement("div");
+    wrap.className = "pending-image-preview";
+    wrap.innerHTML = `<img src="${pendingImageDataUrls[i]}" /><button class="pending-image-remove" title="Remove">&times;</button>`;
+    wrap.querySelector("button")!.addEventListener("click", () => {
+      pendingImageFiles.splice(i, 1);
+      pendingImageDataUrls.splice(i, 1);
+      renderPendingImages();
+    });
+    row.appendChild(wrap);
+  }
+}
+
+messageInput.addEventListener("paste", async (e) => {
+  // Try legacy clipboardData.items first (works in Chromium-based webviews)
+  const items = e.clipboardData?.items;
+  let foundImage = false;
+  if (items) {
+    for (let i = 0; i < items.length; i++) {
+      if (pendingImageFiles.length >= MAX_PENDING_IMAGES) break;
+      const item = items[i];
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+        foundImage = true;
+        const file = item.getAsFile();
+        if (!file) continue;
+        pendingImageFiles.push(file);
+        const reader = new FileReader();
+        reader.onload = () => {
+          pendingImageDataUrls.push(reader.result as string);
+          renderPendingImages();
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+  }
+
+  // Fallback: use Clipboard API (needed for WebKit2GTK / Tauri on Linux)
+  if (!foundImage && navigator.clipboard?.read) {
+    try {
+      const clipItems = await navigator.clipboard.read();
+      for (const clipItem of clipItems) {
+        if (pendingImageFiles.length >= MAX_PENDING_IMAGES) break;
+        const imageType = clipItem.types.find(t => t.startsWith("image/"));
+        if (imageType) {
+          e.preventDefault();
+          const blob = await clipItem.getType(imageType);
+          const file = new File([blob], `clipboard-${Date.now()}.png`, { type: imageType });
+          pendingImageFiles.push(file);
+          const reader = new FileReader();
+          reader.onload = () => {
+            pendingImageDataUrls.push(reader.result as string);
+            renderPendingImages();
+          };
+          reader.readAsDataURL(file);
+        }
+      }
+    } catch {
+      // Clipboard read not available or denied
+    }
+  }
+});
+
 // --- Send ---
 
 async function handleSend() {
   const text = messageInput.value.trim();
-  if (!text || !currentChannel) return;
+  if (!text && pendingImageFiles.length === 0) return;
+  if (!currentChannel) return;
 
   messageInput.value = "";
   autoResize(messageInput);
 
-  renderMessage({ role: "user", content: text, timestamp: new Date().toISOString() });
+  let content = text;
+
+  // Upload pending images
+  if (pendingImageFiles.length > 0) {
+    const files = [...pendingImageFiles];
+    pendingImageFiles = [];
+    pendingImageDataUrls = [];
+    renderPendingImages();
+
+    const imageMarkdowns: string[] = [];
+    const imageNames: string[] = [];
+    for (const file of files) {
+      try {
+        const result = await uploadImage(file, currentChannel.id);
+        imageMarkdowns.push(`![Pasted image](${result.url})`);
+        imageNames.push(result.filename);
+      } catch (err) {
+        console.error("Failed to upload image:", err);
+      }
+    }
+    if (imageMarkdowns.length > 0) {
+      const imagesBlock = imageMarkdowns.join("\n\n");
+      const namesNote = imageNames.map((n) => `(Image: ${n})`).join(" ");
+      content = content
+        ? `${imagesBlock}\n\n${content}\n\n${namesNote}`
+        : `${imagesBlock}\n\nPlease look at ${imageNames.length > 1 ? "these images" : "this image"}: ${namesNote}`;
+    }
+  }
+
+  renderMessage({ role: "user", content, timestamp: new Date().toISOString() });
+  if (streamingEl) {
+    messagesEl.appendChild(streamingEl);
+  }
 
   try {
-    await postChannelMessage(currentChannel.id, text);
+    await postChannelMessage(currentChannel.id, content);
   } catch (err) {
     renderMessage({ role: "system", content: `Failed to send: ${err}` });
   }
@@ -1701,7 +1879,8 @@ async function loadInitialData() {
     backendModels = modelsData;
 
     if (agents.length > 0) {
-      currentAgent = agents[0];
+      const savedAgentId = localStorage.getItem("lit-desktop-agent");
+      currentAgent = (savedAgentId && agents.find(a => a.id === savedAgentId)) || agents[0];
       // Load throttle state for all agents in parallel
       await Promise.all(agents.map((a) => loadAgentThrottle(a)));
       // Load usage for unique backends
