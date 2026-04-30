@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LIT</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div id="app">
+      <nav id="sidebar">
+        <div id="channel-list">
+          <div class="section-label">Channels</div>
+        </div>
+      </nav>
+      <div id="sidebar-resize-handle"></div>
+      <main id="content">
+        <header id="content-header">
+          <button id="sidebar-expand-btn" class="icon-btn header-btn" title="Show sidebar" style="display:none">&#9654;</button>
+          <h2 id="channel-title">Welcome</h2>
+          <div id="channel-actions"></div>
+          <button id="theme-toggle" class="icon-btn header-btn" title="Toggle theme">&#9790;</button>
+        </header>
+        <div id="messages-wrapper">
+          <div id="messages">
+            <div class="message system">
+              <div class="message-content">
+                <p><strong>LIT Desktop v2.0</strong></p>
+                <p>Connect to a LIT server to get started.</p>
+                <p class="hint">Use <kbd>Ctrl+K</kbd> to open the command palette.</p>
+              </div>
+            </div>
+          </div>
+          <button id="scroll-to-bottom" title="Scroll to bottom">
+            <span class="scroll-arrow">&#8595;</span>
+          </button>
+        </div>
+        <div id="input-resize-handle"></div>
+        <div id="input-area">
+          <div id="agent-tabs"></div>
+          <div id="agent-info"></div>
+          <div id="input-row">
+            <textarea id="message-input" placeholder="Type a message..." rows="1"></textarea>
+            <button id="cancel-stream-btn" title="Stop generating" style="display:none">&#9632;</button>
+            <button id="send-btn" title="Send (Enter)">&#8593;</button>
+          </div>
+        </div>
+      </main>
+    </div>
+    <div id="image-lightbox">
+      <span id="lightbox-close">&times;</span>
+      <img id="lightbox-img" src="" alt="Enlarged image" />
+    </div>
+    <div id="command-palette-overlay">
+      <div id="command-palette">
+        <input type="text" id="command-input" placeholder="Type a command..." autocomplete="off" />
+        <div class="command-list" id="command-list"></div>
+      </div>
+    </div>
+  </body>
+</html>

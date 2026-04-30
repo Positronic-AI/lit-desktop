@@ -1,99 +1,26 @@
 {
   "name": "lit-desktop",
-  "version": "1.0.1",
-  "description": "A lightweight chat interface for Ollama with MCP integration",
-  "main": "electron/main.js",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
   "scripts": {
-    "ng": "ng",
-    "start": "ng serve",
-    "build": "ng build --configuration production",
-    "watch": "ng build --watch --configuration development",
-    "test": "ng test",
-    "electron:serve": "wait-on http://localhost:4201 && electron . --no-sandbox",
-    "electron:dev": "NODE_ENV=development concurrently \"ng serve --port 4201\" \"npm run electron:serve\"",
-    "electron:dev:devtools": "NODE_ENV=development OPEN_DEVTOOLS=true concurrently \"ng serve --port 4201\" \"npm run electron:serve\"",
-    "electron:build": "npm run build && electron-builder",
-    "electron:build:windows": "npm run build && electron-builder --windows",
-    "electron:build:mac": "npm run build && electron-builder --mac",
-    "electron:build:linux": "npm run build && electron-builder --linux"
-  },
-  "keywords": [
-    "chat",
-    "ollama",
-    "electron",
-    "angular"
-  ],
-  "author": "Ben Vierck <ben@lit.ai>",
-  "homepage": "https://www.lit.ai",
-  "license": "ISC",
-  "build": {
-    "appId": "ai.lit.desktop",
-    "productName": "lit-desktop",
-    "directories": {
-      "output": "release/"
-    },
-    "files": [
-      "dist/**/*",
-      "electron/**/*",
-      "package.json"
-    ],
-    "mac": {
-      "category": "public.app-category.utilities"
-    },
-    "win": {
-      "target": [
-        "nsis"
-      ]
-    },
-    "linux": {
-      "icon": "src/assets/flame.png",
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "category": "Utility",
-      "maintainer": "Ben Vierck <ben@lit.ai>"
-    }
-  },
-  "devDependencies": {
-    "@angular-devkit/build-angular": "^16.2.12",
-    "@angular/animations": "^16.2.12",
-    "@angular/cdk": "~16.1.0",
-    "@angular/cli": "^16.2.12",
-    "@angular/common": "^16.2.12",
-    "@angular/compiler": "^16.2.12",
-    "@angular/compiler-cli": "^16.2.12",
-    "@angular/core": "^16.2.12",
-    "@angular/forms": "^16.2.12",
-    "@angular/material": "~16.1.0",
-    "@angular/platform-browser": "^16.2.12",
-    "@angular/platform-browser-dynamic": "^16.2.12",
-    "@angular/router": "^16.2.12",
-    "@types/node": "^20.11.30",
-    "angular-split": "^16.2.1",
-    "concurrently": "^8.2.2",
-    "electron": "^36.2.0",
-    "electron-builder": "^26.0.12",
-    "marked": "^4.0.19",
-    "ngx-markdown": "^16.0.0",
-    "ngx-socket-io": "4.5.0",
-    "rxjs": "^7.8.1",
-    "tslib": "^2.6.2",
-    "typescript": "^4.9.5",
-    "wait-on": "^7.2.0",
-    "zone.js": "^0.13.3"
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.11.2",
-    "electron-store": "^8.1.0",
-    "lodash": "^4.17.21",
-    "mcp-client": "^1.12.3",
-    "ollama": "^0.4.4",
-    "reconnecting-eventsource": "^1.6.4",
-    "strict-event-emitter-types": "^2.0.0",
-    "zod": "^3.24.4"
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.0",
+    "@tauri-apps/plugin-opener": "^2",
+    "dompurify": "^3.4.2",
+    "highlight.js": "^11.11.1",
+    "marked": "^18.0.2",
+    "marked-highlight": "^2.2.4"
   },
-  "optionalDependencies": {
-    "system-prompt-composer": "^1.0.8"
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3"
   }
 }
