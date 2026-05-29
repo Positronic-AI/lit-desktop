@@ -28,7 +28,39 @@ import {
   type ThrottleState,
 } from "./api";
 import { open } from "@tauri-apps/plugin-dialog";
+import { Command as ShellCommand, type Child } from "@tauri-apps/plugin-shell";
 import { renderMarkdown } from "./markdown";
+
+let backendProcess: Child | null = null;
+
+async function startBackend(): Promise<boolean> {
+  if (await checkConnection()) return true;
+
+  try {
+    const cmd = ShellCommand.sidecar("binaries/start-backend");
+    cmd.on("close", (data) => {
+      console.log(`[backend] exited with code ${data.code}`);
+      backendProcess = null;
+    });
+    cmd.stdout.on("data", (line) => console.log(`[backend] ${line}`));
+    cmd.stderr.on("data", (line) => console.warn(`[backend] ${line}`));
+    backendProcess = await cmd.spawn();
+    console.log("[backend] spawned, waiting for health check...");
+  } catch (e) {
+    console.error("[backend] failed to spawn sidecar:", e);
+    return false;
+  }
+
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (await checkConnection()) {
+      console.log("[backend] ready");
+      return true;
+    }
+  }
+  console.error("[backend] timed out waiting for server");
+  return false;
+}
 
 function loadLocalChannels(): Channel[] {
   try {
@@ -1841,12 +1873,17 @@ async function init() {
   const scrollBtn = document.getElementById("scroll-to-bottom");
   if (scrollBtn) scrollBtn.addEventListener("click", scrollToBottom);
 
-  const connected = await checkConnection();
+  renderMessage({
+    role: "system",
+    content: "Starting LIT backend...",
+  });
+  const connected = await startBackend();
   if (!connected) {
     setStatus("disconnected");
+    clearMessages();
     renderMessage({
       role: "system",
-      content: "Cannot connect to LIT server at localhost:5000. Make sure the server is running.",
+      content: "Failed to start LIT backend. Check the console for details.",
     });
     const retry = setInterval(async () => {
       setStatus("connecting");
@@ -1861,6 +1898,7 @@ async function init() {
     }, 5000);
     return;
   }
+  clearMessages();
 
   setStatus("connected");
   await loadInitialData();
@@ -2174,5 +2212,12 @@ document.addEventListener("keydown", (e) => {
 
 setInterval(refreshSidebar, 15000);
 setInterval(refreshAgents, 30000);
+
+window.addEventListener("beforeunload", () => {
+  if (backendProcess) {
+    backendProcess.kill();
+    backendProcess = null;
+  }
+});
 
 init();
