@@ -1,6 +1,7 @@
 @import "highlight.js/styles/atom-one-dark.min.css";
 
 :root, [data-theme="dark"] {
+  color-scheme: dark;
   --bg-primary: #282c34;
   --bg-secondary: #21252b;
   --bg-tertiary: #2c313a;
@@ -21,6 +22,7 @@
 }
 
 [data-theme="light"] {
+  color-scheme: light;
   --bg-primary: #fafafa;
   --bg-secondary: #f0f0f0;
   --bg-tertiary: #e5e5e6;
@@ -1716,9 +1718,20 @@ kbd {
 .settings-link { color: var(--accent); font-size: 12px; cursor: pointer; display: inline-block; margin: 6px 0; }
 
 .settings-input, .settings-select {
-  background: var(--bg-input); color: var(--text-primary);
+  -webkit-appearance: none; appearance: none;
+  background-color: var(--bg-input); color: var(--text-primary);
   border: 1px solid var(--border); border-radius: 5px; padding: 7px 10px;
   font-size: 13px; outline: none;
+}
+.settings-select {
+  padding-right: 26px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23828997' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 12px;
+}
+.settings-input option, .settings-select option {
+  background: var(--bg-secondary); color: var(--text-primary);
 }
 .settings-input:focus, .settings-select:focus { border-color: var(--accent); }
 .settings-input.wide, .settings-select.wide { width: 100%; box-sizing: border-box; margin-bottom: 10px; }
@@ -1814,7 +1827,15 @@ kbd {
   font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px;
 }
 #terminal-drawer-close:hover { color: var(--text-primary); }
-#terminal-host { flex: 1; min-height: 0; overflow: hidden; padding: 6px; display: flex; }
-#terminal-host .xterm { height: 100%; width: 100%; }
+#terminal-host { flex: 1; min-height: 0; overflow: hidden; padding: 6px; }
+#terminal-host .xterm { width: 100%; height: 100%; }
 #terminal-toggle-btn { font-family: monospace; font-weight: 700; }
 #terminal-toggle-btn.active { color: var(--accent); }
+
+.form-section-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--text-muted); margin: 14px 0 6px; padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.form-field textarea.settings-input { resize: vertical; font-family: inherit; line-height: 1.4; }
+.agent-tab-add { cursor: pointer; }

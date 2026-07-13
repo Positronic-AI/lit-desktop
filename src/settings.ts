@@ -82,8 +82,12 @@ async function openExternal(url: string): Promise<void> {
 
 let overlay: HTMLElement | null = null;
 let onCloseCb: (() => void) | null = null;
+let pendingAgentId: string | null = null; // "new" = create form; an id = edit form
 
-export function openSettings(onClose?: () => void): void {
+export function openSettings(
+  onClose?: () => void,
+  target?: { tab?: "connections" | "agents"; agentId?: string },
+): void {
   onCloseCb = onClose || null;
   if (!overlay) {
     overlay = el("div", "settings-overlay");
@@ -96,7 +100,8 @@ export function openSettings(onClose?: () => void): void {
   overlay.innerHTML = "";
   overlay.appendChild(buildShell());
   overlay.classList.add("active");
-  selectTab("connections");
+  pendingAgentId = target?.agentId || null;
+  selectTab(target?.tab || (target?.agentId ? "agents" : "connections"));
 }
 
 function closeSettings(): void {
@@ -505,6 +510,13 @@ async function renderAgents(): Promise<void> {
     return;
   }
   bodyEl.innerHTML = "";
+  // Jump straight to a form when opened via the + button or a per-agent gear.
+  if (pendingAgentId) {
+    const id = pendingAgentId;
+    pendingAgentId = null;
+    openAgentForm(id === "new" ? null : id);
+    return;
+  }
   bodyEl.appendChild(el("p", "settings-intro", "Agents are your Claudes. Each binds to a Connection and a model."));
 
   if (agents.length === 0) {
@@ -651,6 +663,28 @@ async function openAgentForm(agentId: string | null): Promise<void> {
   backendSel.addEventListener("change", fillModels);
   credSel.addEventListener("change", fillModels);
 
+  // Role — system prompt (defaults to the backend's default for new agents).
+  const promptInput = document.createElement("textarea");
+  promptInput.className = "settings-input wide";
+  promptInput.rows = 7;
+  promptInput.value = existing?.system_prompt || "";
+  if (!existing) fetchDefaultPrompt("claude").then((p) => { if (!promptInput.value) promptInput.value = p; });
+
+  // Advanced — temperature + reasoning effort.
+  const tempInput = document.createElement("input");
+  tempInput.type = "number"; tempInput.min = "0"; tempInput.max = "1"; tempInput.step = "0.1";
+  tempInput.className = "settings-input wide";
+  tempInput.value = String(existing?.temperature ?? 0.7);
+
+  const effortSel = document.createElement("select");
+  effortSel.className = "settings-select wide";
+  for (const e of ["", "low", "medium", "high", "xhigh", "max"]) {
+    const o = document.createElement("option");
+    o.value = e; o.textContent = e || "(default)";
+    if ((existing?.effort || "") === e) o.selected = true;
+    effortSel.appendChild(o);
+  }
+
   const field = (label: string, control: HTMLElement) => {
     const f = el("div", "form-field");
     f.append(el("label", "form-label", label), control);
@@ -662,6 +696,11 @@ async function openAgentForm(agentId: string | null): Promise<void> {
     field("Connection", credSel),
     field("Backend", backendSel),
     field("Model", modelSel),
+    el("div", "form-section-label", "Role"),
+    field("System prompt", promptInput),
+    el("div", "form-section-label", "Advanced"),
+    field("Temperature", tempInput),
+    field("Reasoning effort", effortSel),
   );
 
   const save = el("button", "settings-primary-btn", agentId ? "Save agent" : "Create agent");
@@ -675,7 +714,7 @@ async function openAgentForm(agentId: string | null): Promise<void> {
     err.style.display = "none";
     try {
       const id = agentId || slug(name);
-      const base: any = existing ? { ...existing } : { system_prompt: await fetchDefaultPrompt("claude"), temperature: 0.7 };
+      const base: any = existing ? { ...existing } : {};
       await saveAgent({
         ...base,
         id,
@@ -683,6 +722,9 @@ async function openAgentForm(agentId: string | null): Promise<void> {
         backend: backendSel.value,
         model: modelSel.value,
         credentials_id: credSel.value || null,
+        system_prompt: promptInput.value,
+        temperature: parseFloat(tempInput.value) || 0.7,
+        effort: effortSel.value || null,
       });
       renderAgents();
     } catch {

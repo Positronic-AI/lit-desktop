@@ -1056,6 +1056,7 @@ function renderAgentTabs() {
   addBtn.className = "agent-tab-add";
   addBtn.textContent = "+";
   addBtn.title = "Add agent";
+  addBtn.addEventListener("click", () => openSettings(() => loadInitialData(), { tab: "agents", agentId: "new" }));
   agentTabsEl.appendChild(addBtn);
 }
 
@@ -1089,6 +1090,7 @@ function renderAgentInfo() {
   settingsBtn.className = "agent-ctrl-btn settings-btn";
   settingsBtn.title = "Agent settings";
   settingsBtn.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>`;
+  settingsBtn.addEventListener("click", () => openSettings(() => loadInitialData(), { tab: "agents", agentId: agent.id }));
   agentInfoEl.appendChild(settingsBtn);
 
   // Model selector button (flat text + chevron, opens dropdown)
@@ -1431,14 +1433,19 @@ function renderSidebarIndicators() {
 
 // --- Channel header actions ---
 
-function archiveCurrentChannel() {
+async function archiveCurrentChannel() {
   if (!currentChannel) return;
   const archived = currentChannel;
-  fetch(`${getServer().url}/mux/channels/${archived.id}/archive`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-  }).catch(() => {});
+  // Archive is PATCH /channels/{id} (folder channels: removes the symlink so it
+  // drops from navigation). Await it before refreshing, or the refresh races the
+  // archive and the channel reappears.
+  try {
+    await fetch(`${getServer().url}/mux/channels/${archived.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ team: "local" }),
+    });
+  } catch { /* offline / already gone */ }
 
   localChannels = localChannels.filter((c) => c.id !== archived.id);
   saveLocalChannels();
@@ -1448,7 +1455,7 @@ function archiveCurrentChannel() {
   channelActionsEl.innerHTML = "";
   clearMessages();
   if (channelWs) { channelWs.close(); channelWs = null; }
-  refreshSidebar();
+  await refreshSidebar();
 }
 
 function renderChannelHeader() {
