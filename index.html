@@ -21,6 +21,8 @@
           <button id="sidebar-expand-btn" class="icon-btn header-btn" title="Show sidebar" style="display:none">&#9654;</button>
           <h2 id="channel-title">Welcome</h2>
           <div id="channel-actions"></div>
+          <button id="terminal-toggle-btn" class="icon-btn header-btn" title="Toggle live terminal">&gt;_</button>
+          <button id="settings-btn-global" class="icon-btn header-btn" title="Settings">&#9881;</button>
           <button id="theme-toggle" class="icon-btn header-btn" title="Toggle theme">&#9790;</button>
         </header>
         <div id="messages-wrapper">
@@ -36,6 +38,14 @@
           <button id="scroll-to-bottom" title="Scroll to bottom">
             <span class="scroll-arrow">&#8595;</span>
           </button>
+        </div>
+        <div id="terminal-panel" style="display:none">
+          <div id="terminal-panel-header">
+            <span id="terminal-panel-title">Live terminal</span>
+            <span id="terminal-panel-hint">— you're driving the real session; type to steer it</span>
+            <button id="terminal-drawer-close" title="Close terminal">&times;</button>
+          </div>
+          <div id="terminal-host"></div>
         </div>
         <div id="input-resize-handle"></div>
         <div id="input-area">

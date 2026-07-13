@@ -1,0 +1,28 @@
+#!/bin/bash
+# lit-desktop backend launcher.
+#
+# ISOLATION INVARIANT (discovered 2026-07-13): the desktop backend must NEVER
+# read or write the production LIT instance's data. Contamination happens by
+# ABSENCE — an unset env var silently falls back to the shared production tree.
+# Three levers are required; missing any one re-shares that surface:
+#   LIT_DATA_DIR      -> agents, channels, turns, DMs, credentials  (the message tree)
+#   LIT_CONFIG_DIR    -> preferences / config.json
+#   XDG_RUNTIME_DIR   -> the per-user bridge socket (else two bridge daemons collide)
+# Plus --host 127.0.0.1 (was 0.0.0.0) so the local app is loopback-only.
+#
+# Dev sandbox paths below. Productionization swaps these for OS app-data dirs.
+set -e
+
+SANDBOX="${LIT_DESKTOP_SANDBOX:-$HOME/.local/share/lit-desktop}"
+export LIT_DATA_DIR="$SANDBOX/data"
+export LIT_CONFIG_DIR="$SANDBOX/config"
+export XDG_RUNTIME_DIR="$SANDBOX/run"
+export LIT_LOCAL_MODE=true
+
+mkdir -p "$LIT_DATA_DIR" "$LIT_CONFIG_DIR"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
+cd /opt/lit-platform
+source lit-lib/.venv/bin/activate
+exec lit serve --api-only --host 127.0.0.1 --port 5000

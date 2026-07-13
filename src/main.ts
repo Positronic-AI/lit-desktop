@@ -30,6 +30,8 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 import { Command as ShellCommand, type Child } from "@tauri-apps/plugin-shell";
 import { renderMarkdown } from "./markdown";
+import { openSettings } from "./settings";
+import { openTerminal, closeTerminal, isTerminalOpen, fitToGrid } from "./terminal";
 
 let backendProcess: Child | null = null;
 
@@ -263,6 +265,13 @@ function parseMessageContent(raw: string): ParsedContent {
     .replace(/^REACT:.*$/gm, "")
     .replace(/^LINKS:.*$/gm, "")
     .trim();
+
+  // Normalize STX/ETX tool-result delimiters (\x02RESULT\x03 … \x02/RESULT\x03)
+  // to the bracket form the tool-parser walks below. Without this the result
+  // leaks as raw text AND its tool call never resolves (spinner spins forever).
+  content = content
+    .replace(/\x02RESULT\x03/g, "[TOOL_RESULT]")
+    .replace(/\x02\/RESULT\x03/g, "[/TOOL_RESULT]");
 
   if (!hasToolDelimiters(content)) {
     // Strip thinking for non-tool messages
@@ -936,6 +945,53 @@ function clearMessages() {
   updateScrollButton();
 }
 
+function toggleTerminalPanel() {
+  setTerminalOpen(!isTerminalOpen());
+}
+
+function setTerminalOpen(open: boolean) {
+  const panel = document.getElementById("terminal-panel");
+  const host = document.getElementById("terminal-host");
+  const btn = document.getElementById("terminal-toggle-btn");
+  // The chat region the terminal replaces when it takes over the whole area.
+  const chatRegion = [
+    document.getElementById("messages-wrapper"),
+    document.getElementById("input-resize-handle"),
+    document.getElementById("input-area"),
+  ];
+  if (!panel || !host) return;
+  if (open && currentChannel) {
+    for (const e of chatRegion) if (e) e.style.display = "none";
+    panel.style.display = "flex";
+    btn?.classList.add("active");
+    openTerminal(host, currentChannel.id);
+    setTimeout(fitToGrid, 60);
+  } else {
+    panel.style.display = "none";
+    for (const e of chatRegion) if (e) e.style.display = "";
+    btn?.classList.remove("active");
+    closeTerminal();
+  }
+}
+
+function renderOnboarding() {
+  clearMessages();
+  const wrap = document.createElement("div");
+  wrap.className = "message system";
+  const content = document.createElement("div");
+  content.className = "message-content";
+  content.innerHTML =
+    "<p><strong>Welcome to LIT.</strong></p>" +
+    "<p>To get started, add a connection (your Claude subscription or an API key) and create an agent.</p>";
+  const btn = document.createElement("button");
+  btn.className = "settings-primary-btn";
+  btn.textContent = "Set up a connection & agent";
+  btn.addEventListener("click", () => openSettings(() => loadInitialData()));
+  content.appendChild(btn);
+  wrap.appendChild(content);
+  messagesEl.appendChild(wrap);
+}
+
 function mergeChannels(local: Channel[], remote: Channel[]): Channel[] {
   const map = new Map<string, Channel>();
   for (const ch of local) map.set(ch.id, ch);
@@ -1420,6 +1476,11 @@ async function openChannel(channel: Channel) {
   channelTitle.textContent = channel.name;
   localStorage.setItem("lit-desktop-channel", JSON.stringify({ id: channel.id, name: channel.name }));
   renderChannelHeader();
+  // If the terminal is open, re-attach it to the newly-opened channel.
+  if (isTerminalOpen()) {
+    const host = document.getElementById("terminal-host");
+    if (host) { openTerminal(host, channel.id); setTimeout(fitToGrid, 60); }
+  }
   clearMessages();
 
   if (channelWs) {
@@ -1873,6 +1934,15 @@ async function init() {
   const scrollBtn = document.getElementById("scroll-to-bottom");
   if (scrollBtn) scrollBtn.addEventListener("click", scrollToBottom);
 
+  const settingsBtn = document.getElementById("settings-btn-global");
+  if (settingsBtn) settingsBtn.addEventListener("click", () => openSettings(() => loadInitialData()));
+
+  const terminalBtn = document.getElementById("terminal-toggle-btn");
+  if (terminalBtn) terminalBtn.addEventListener("click", toggleTerminalPanel);
+  const terminalClose = document.getElementById("terminal-drawer-close");
+  if (terminalClose) terminalClose.addEventListener("click", () => setTerminalOpen(false));
+  window.addEventListener("resize", () => { if (isTerminalOpen()) fitToGrid(); });
+
   renderMessage({
     role: "system",
     content: "Starting LIT backend...",
@@ -1938,8 +2008,23 @@ async function loadInitialData() {
     renderAgentInfo();
 
     channelListCache = remote;
+    // Reconcile: drop local channels the server no longer recognizes (stale
+    // cross-backend ghosts). Open-Folder registers server-side and appears in
+    // navigation, so real channels survive; only ghosts (which 404 on send) go.
+    const remoteIds = new Set(remote.map((c) => c.id));
+    const ghosts = localChannels.filter((c) => !remoteIds.has(c.id));
+    if (ghosts.length) {
+      localChannels = localChannels.filter((c) => remoteIds.has(c.id));
+      saveLocalChannels();
+      console.log("[channels] pruned stale local channels:", ghosts.map((c) => c.id));
+    }
     const all = mergeChannels(localChannels, remote);
     renderSidebar(all);
+
+    if (agents.length === 0) {
+      renderOnboarding();
+      return;
+    }
 
     // Restore last active channel, or fall back to first
     let target = all[0] || null;

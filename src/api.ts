@@ -259,3 +259,197 @@ export async function uploadImage(file: File, channelId?: string): Promise<{ url
   const data = await res.json();
   return { url: `${currentServer.url}/mux${data.url}`, filename: data.filename };
 }
+
+// --- Credentials / Connections ---
+
+export type Vendor = "anthropic" | "google" | "openai" | "local";
+export type CredMode = "subscription" | "api_key" | "local";
+export type CredStatus = "authed" | "expiring" | "expired" | "unconfigured";
+
+export interface Credential {
+  id: string | null;
+  name: string;
+  vendor: Vendor;
+  mode: CredMode;
+  status: CredStatus;
+  is_default: boolean;
+  has_manifest: boolean;
+}
+
+export interface TokenDetails {
+  scopes?: string[];
+  expires_in?: string;
+  expires_at?: number;
+  auth_method?: string;
+}
+
+export interface BackendStatus {
+  id: string;
+  registered?: boolean;
+  enabled?: boolean;
+  healthy?: boolean;
+  configured?: boolean;
+  auth_status: string;
+  error?: string | null;
+  token_details?: TokenDetails | null;
+  warning?: string | null;
+}
+
+// Which backend serves a given (vendor, mode) — mirror of the server's
+// _BACKEND_BY_VENDOR_MODE, used to pick the status/OAuth endpoint.
+export function backendForVendorMode(vendor: Vendor, mode: CredMode): string {
+  if (vendor === "anthropic") return "claude-cli";
+  if (vendor === "google") return mode === "subscription" ? "antigravity" : "gemini";
+  if (vendor === "openai") return "chatgpt";
+  return "claude-cli";
+}
+
+export async function listCredentials(team = "local"): Promise<Credential[]> {
+  const data = await apiFetch<{ credentials: Credential[] }>(`/credentials?team=${team}`);
+  return data.credentials || [];
+}
+
+export async function createCredential(
+  req: { id: string; name: string; vendor: Vendor; mode: CredMode },
+  team = "local",
+): Promise<Credential> {
+  return apiFetch<Credential>(`/credentials?team=${team}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+}
+
+export async function updateCredential(
+  cid: string,
+  updates: { name?: string; status?: CredStatus },
+  team = "local",
+): Promise<Credential> {
+  return apiFetch<Credential>(`/credentials/${cid}?team=${team}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+}
+
+export async function deleteCredential(cid: string, team = "local"): Promise<void> {
+  await apiFetch(`/credentials/${cid}?team=${team}`, { method: "DELETE" });
+}
+
+export async function setCredentialApiKey(cid: string, apiKey: string, team = "local"): Promise<Credential> {
+  return apiFetch<Credential>(`/credentials/${cid}/api-key?team=${team}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+}
+
+export async function fetchBackendStatus(backendId: string, credentialsId?: string): Promise<BackendStatus> {
+  const q = credentialsId ? `?credentials_id=${encodeURIComponent(credentialsId)}` : "";
+  return apiFetch<BackendStatus>(`/backends/${backendId}/status${q}`);
+}
+
+// --- OAuth (paste-code flow: claude-cli, gemini, antigravity) ---
+
+export interface OAuthSession {
+  session_id: string;
+  status: string;
+  oauth_url?: string | null;
+  device_url?: string | null;
+  device_code?: string | null;
+  error?: string | null;
+}
+
+export async function startOAuth(backendId: string, credentialsId?: string): Promise<OAuthSession> {
+  const q = credentialsId ? `?credentials_id=${encodeURIComponent(credentialsId)}` : "";
+  return apiFetch<OAuthSession>(`/backends/${backendId}/auth/start${q}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+}
+
+export async function oauthStatus(backendId: string, sessionId: string): Promise<OAuthSession> {
+  return apiFetch<OAuthSession>(`/backends/${backendId}/auth/status?session_id=${encodeURIComponent(sessionId)}`);
+}
+
+export async function submitOAuthCode(backendId: string, sessionId: string, code: string): Promise<{ status: string; error?: string | null }> {
+  return apiFetch(`/backends/${backendId}/auth/submit-code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, code }),
+  });
+}
+
+export async function cancelOAuth(backendId: string, sessionId: string): Promise<void> {
+  await apiFetch(`/backends/${backendId}/auth/cancel?session_id=${encodeURIComponent(sessionId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  }).catch(() => {});
+}
+
+// --- Agents (full config) ---
+
+export interface FullAgent {
+  id: string;
+  name: string;
+  backend: string;
+  model: string;
+  credentials_id?: string | null;
+  system_prompt?: string | null;
+  temperature?: number;
+  max_tokens?: number | null;
+  effort?: string | null;
+  mcp_servers?: string[];
+  disabled_skills?: string[];
+  [key: string]: unknown;
+}
+
+export interface ModelsResponse {
+  models: Record<string, BackendModel[]>;
+  constraints: Record<string, string[]>;
+}
+
+export async function fetchModelsWithConstraints(): Promise<ModelsResponse> {
+  const data = await apiFetch<{ models: Record<string, { name: string; display_name?: string }[]>; constraints?: Record<string, string[]> }>("/models");
+  const models: Record<string, BackendModel[]> = {};
+  for (const [backend, list] of Object.entries(data.models || {})) {
+    models[backend] = list.map((m) => ({ name: m.name || String(m), display_name: m.display_name || m.name || String(m) }));
+  }
+  return { models, constraints: data.constraints || {} };
+}
+
+export async function fetchFullAgents(team = "local"): Promise<FullAgent[]> {
+  const data = await apiFetch<{ agents: FullAgent[] }>(`/agents?team=${team}`);
+  return data.agents || [];
+}
+
+export async function getAgent(agentId: string): Promise<FullAgent | null> {
+  try {
+    return await apiFetch<FullAgent>(`/agents/${agentId}`);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveAgent(config: Partial<FullAgent> & { id: string; name: string }): Promise<FullAgent> {
+  return apiFetch<FullAgent>("/agents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+}
+
+export async function deleteAgent(agentId: string, deleteSessions = false): Promise<void> {
+  await apiFetch(`/agents/${agentId}?delete_sessions=${deleteSessions}`, { method: "DELETE" });
+}
+
+export async function fetchDefaultPrompt(model = "claude"): Promise<string> {
+  try {
+    const data = await apiFetch<{ prompt: string }>(`/agents/default-prompt?model=${model}`);
+    return data.prompt || "";
+  } catch {
+    return "";
+  }
+}
