@@ -41,8 +41,13 @@ SRC="src-tauri/binaries/lit-server-${TRIPLE}${EXE}"
 DEST="src-tauri/binaries/${SIDECAR}-${TRIPLE}${EXE}"
 [ -f "$SRC" ] || { echo "missing sidecar binary: $SRC (build it with PyInstaller first)"; exit 1; }
 if [ "$DEST" != "$SRC" ]; then cp "$SRC" "$DEST" && chmod +x "$DEST"; fi
-# Ad-hoc sign the sidecar so the app can spawn it on Apple Silicon.
-if [ -n "$SIGNID" ]; then codesign --force --sign - "$DEST" && echo "ad-hoc signed sidecar: $DEST"; fi
+# Ad-hoc sign the sidecar (with hardened runtime + entitlements that disable
+# library validation) so it can load its bundled Python framework on Apple Silicon.
+if [ -n "$SIGNID" ]; then
+  codesign --force --sign - --timestamp=none --options runtime \
+    --entitlements src-tauri/entitlements.plist "$DEST" \
+    && echo "ad-hoc signed sidecar (library validation disabled): $DEST"
+fi
 
 cp "$CONF" "$CONF.bak"
 trap 'mv "$CONF.bak" "$CONF"' EXIT
@@ -69,8 +74,11 @@ d["bundle"]["icon"] = [
     f"{icondir}/icon.ico",
 ]
 if signid:
-    # Ad-hoc sign the whole bundle (covers nested binaries too).
-    d["bundle"].setdefault("macOS", {})["signingIdentity"] = signid
+    # Ad-hoc sign the whole bundle with the same library-validation-disabling
+    # entitlements (path is relative to src-tauri/, where tauri.conf.json lives).
+    m = d["bundle"].setdefault("macOS", {})
+    m["signingIdentity"] = signid
+    m["entitlements"] = "entitlements.plist"
 json.dump(d, open(conf, "w"), indent=2)
 PY
 echo ">>> version=${VERSION:-$(python3 -c "import json;print(json.load(open('$CONF'))['version'])")}"
