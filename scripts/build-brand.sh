@@ -47,13 +47,17 @@ if [ -n "$SIGNID" ]; then codesign --force --sign - "$DEST" && echo "ad-hoc sign
 cp "$CONF" "$CONF.bak"
 trap 'mv "$CONF.bak" "$CONF"' EXIT
 
-python3 - "$CONF" "$PRODUCT" "$ID" "$TITLE" "$MAINBIN" "$SIDECAR" "$ICONDIR" "$TARGETS" "$SIGNID" <<'PY'
+# Optional version override (CI passes an incrementing build version here).
+VERSION="${LIT_BUILD_VERSION:-}"
+python3 - "$CONF" "$PRODUCT" "$ID" "$TITLE" "$MAINBIN" "$SIDECAR" "$ICONDIR" "$TARGETS" "$SIGNID" "$VERSION" <<'PY'
 import json, sys
-conf, product, ident, title, mainbin, sidecar, icondir, targets, signid = sys.argv[1:10]
+conf, product, ident, title, mainbin, sidecar, icondir, targets, signid, version = sys.argv[1:11]
 d = json.load(open(conf))
 d["productName"] = product
 d["identifier"] = ident
 d["mainBinaryName"] = mainbin
+if version:
+    d["version"] = version
 d["app"]["windows"][0]["title"] = title
 d["bundle"]["externalBin"] = [f"binaries/{sidecar}"]
 d["bundle"]["targets"] = json.loads(targets)
@@ -69,6 +73,7 @@ if signid:
     d["bundle"].setdefault("macOS", {})["signingIdentity"] = signid
 json.dump(d, open(conf, "w"), indent=2)
 PY
+echo ">>> version=${VERSION:-$(python3 -c "import json;print(json.load(open('$CONF'))['version'])")}"
 
 echo ">>> building brand=$BRAND product='$PRODUCT' id=$ID bin=$MAINBIN sidecar=$SIDECAR triple=$TRIPLE"
 VITE_LIT_BRAND="$BRAND" npm run tauri build

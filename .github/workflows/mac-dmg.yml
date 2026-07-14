@@ -14,10 +14,18 @@ on:
       lib_ref:
         description: "positronic-lit branch/ref"
         default: develop
+      version:
+        description: "Version override (blank → auto 2.0.<run number>)"
+        default: ""
 
 jobs:
   build-dmg:
     runs-on: macos-latest # Apple Silicon → aarch64-apple-darwin
+    permissions:
+      contents: write # to publish the release
+    env:
+      # Auto-incrementing build version: each run bumps the patch. Override via input.
+      LIT_BUILD_VERSION: ${{ inputs.version || format('2.0.{0}', github.run_number) }}
     steps:
       - name: Checkout lit-desktop
         uses: actions/checkout@v4
@@ -63,9 +71,24 @@ jobs:
           npm install
           ./scripts/build-brand.sh "${{ inputs.brand }}"
 
-      - name: Upload .dmg
+      - name: Upload .dmg artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.brand }}-macos-dmg
           path: src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DMG=$(find src-tauri/target/release/bundle/dmg -name "*.dmg" | head -1)
+          TAG="${{ inputs.brand }}-v${LIT_BUILD_VERSION}"
+          echo "publishing $TAG with $DMG"
+          gh release create "$TAG" "$DMG" \
+            --repo "${{ github.repository }}" \
+            --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (macOS · Apple Silicon)" \
+            --notes "Unsigned tester build (Apple Silicon).
+
+**Install:** open the \`.dmg\`, drag the app to Applications, then run \`xattr -cr /Applications/<App>.app\` once and open it. Full Developer-ID signing/notarization is coming; until then the \`xattr\` step clears the download quarantine." \
+            --latest
