@@ -32,6 +32,7 @@ import { Command as ShellCommand, type Child } from "@tauri-apps/plugin-shell";
 import { renderMarkdown } from "./markdown";
 import { openSettings } from "./settings";
 import { openTerminal, closeTerminal, isTerminalOpen, fitToGrid } from "./terminal";
+import { brand } from "./brand";
 
 let backendProcess: Child | null = null;
 
@@ -39,7 +40,7 @@ async function startBackend(): Promise<boolean> {
   if (await checkConnection()) return true;
 
   try {
-    const cmd = ShellCommand.sidecar("binaries/start-backend");
+    const cmd = ShellCommand.sidecar(`binaries/${brand.sidecarName}`);
     cmd.on("close", (data) => {
       console.log(`[backend] exited with code ${data.code}`);
       backendProcess = null;
@@ -980,8 +981,10 @@ function renderOnboarding() {
   wrap.className = "message system";
   const content = document.createElement("div");
   content.className = "message-content";
+  const logoHtml = brand.logo ? `<img src="${brand.logo}" alt="${brand.displayName}" class="brand-logo" />` : "";
   content.innerHTML =
-    "<p><strong>Welcome to LIT.</strong></p>" +
+    logoHtml +
+    `<p><strong>Welcome to ${brand.displayName}.</strong></p>` +
     "<p>To get started, add a connection (your Claude subscription or an API key) and create an agent.</p>";
   const btn = document.createElement("button");
   btn.className = "settings-primary-btn";
@@ -1934,6 +1937,7 @@ function initTheme() {
 }
 
 async function init() {
+  document.title = brand.windowTitle;
   initTheme();
   setStatus("connecting");
   initSidebar();

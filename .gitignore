@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Frozen backend binaries (rebuilt by PyInstaller / CI)
+src-tauri/binaries/*server*
+
+# Channel data
+.lit/
