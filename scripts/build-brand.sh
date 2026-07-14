@@ -24,6 +24,10 @@ case "$TRIPLE" in
   *windows*) TARGETS='["msi","nsis"]' ;;
   *)         TARGETS='["deb"]' ;;
 esac
+# Ad-hoc code signing on macOS: Apple Silicon refuses to run unsigned executables,
+# so ad-hoc sign both the sidecar and the app bundle. (Full Developer ID signing +
+# notarization comes later, once a cert is available.)
+SIGNID=""; case "$TRIPLE" in *darwin*) SIGNID="-";; esac
 
 case "$BRAND" in
   jovai) PRODUCT="JovAI";       ID="ai.jov.desktop"; TITLE="JovAI"; MAINBIN="jovai";       SIDECAR="jovai-server"; ICONDIR="icons-jovai" ;;
@@ -37,13 +41,15 @@ SRC="src-tauri/binaries/lit-server-${TRIPLE}${EXE}"
 DEST="src-tauri/binaries/${SIDECAR}-${TRIPLE}${EXE}"
 [ -f "$SRC" ] || { echo "missing sidecar binary: $SRC (build it with PyInstaller first)"; exit 1; }
 if [ "$DEST" != "$SRC" ]; then cp "$SRC" "$DEST" && chmod +x "$DEST"; fi
+# Ad-hoc sign the sidecar so the app can spawn it on Apple Silicon.
+if [ -n "$SIGNID" ]; then codesign --force --sign - "$DEST" && echo "ad-hoc signed sidecar: $DEST"; fi
 
 cp "$CONF" "$CONF.bak"
 trap 'mv "$CONF.bak" "$CONF"' EXIT
 
-python3 - "$CONF" "$PRODUCT" "$ID" "$TITLE" "$MAINBIN" "$SIDECAR" "$ICONDIR" "$TARGETS" <<'PY'
+python3 - "$CONF" "$PRODUCT" "$ID" "$TITLE" "$MAINBIN" "$SIDECAR" "$ICONDIR" "$TARGETS" "$SIGNID" <<'PY'
 import json, sys
-conf, product, ident, title, mainbin, sidecar, icondir, targets = sys.argv[1:9]
+conf, product, ident, title, mainbin, sidecar, icondir, targets, signid = sys.argv[1:10]
 d = json.load(open(conf))
 d["productName"] = product
 d["identifier"] = ident
@@ -58,6 +64,9 @@ d["bundle"]["icon"] = [
     f"{icondir}/icon.icns",
     f"{icondir}/icon.ico",
 ]
+if signid:
+    # Ad-hoc sign the whole bundle (covers nested binaries too).
+    d["bundle"].setdefault("macOS", {})["signingIdentity"] = signid
 json.dump(d, open(conf, "w"), indent=2)
 PY
 
