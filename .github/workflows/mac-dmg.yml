@@ -87,8 +87,6 @@ jobs:
           echo "publishing $TAG with $DMG"
           gh release create "$TAG" "$DMG" \
             --repo "${{ github.repository }}" \
-            --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (macOS · Apple Silicon)" \
-            --notes "Unsigned tester build (Apple Silicon).
-
-**Install:** open the \`.dmg\`, drag the app to Applications, then run \`xattr -cr /Applications/<App>.app\` once and open it. Full Developer-ID signing/notarization is coming; until then the \`xattr\` step clears the download quarantine." \
+            --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (macOS - Apple Silicon)" \
+            --notes "Unsigned tester build (Apple Silicon). Install: open the .dmg, drag the app to Applications, then run 'xattr -cr /Applications/<App>.app' once and open it. Full Developer-ID signing/notarization is coming; until then the xattr step clears the download quarantine." \
             --latest
