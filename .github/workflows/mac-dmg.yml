@@ -1,8 +1,8 @@
 name: Build macOS DMG
 
 # Manual trigger — builds a branded, unsigned .dmg for testers.
-# Requires repo secret LIT_LIB_TOKEN: a token with read access to
-# Positronic-AI/positronic-lit (to build the frozen backend on the Mac runner).
+# The backend is installed from the PUBLIC pre-built wheel (Positronic-AI/
+# lit-releases) — this repo needs NO access to lit-lib source and NO token.
 on:
   workflow_dispatch:
     inputs:
@@ -11,16 +11,16 @@ on:
         type: choice
         options: [jovai, litai]
         default: jovai
-      lib_ref:
-        description: "positronic-lit branch/ref"
-        default: develop
+      lib_version:
+        description: "positronic-lit wheel version (blank/latest -> newest published)"
+        default: "latest"
       version:
-        description: "Version override (blank → auto 2.0.<run number>)"
+        description: "Version override (blank -> auto 2.0.<run number>)"
         default: ""
 
 jobs:
   build-dmg:
-    runs-on: macos-latest # Apple Silicon → aarch64-apple-darwin
+    runs-on: macos-latest # Apple Silicon -> aarch64-apple-darwin
     permissions:
       contents: write # to publish the release
     env:
@@ -29,14 +29,6 @@ jobs:
     steps:
       - name: Checkout lit-desktop
         uses: actions/checkout@v4
-
-      - name: Checkout positronic-lit (the backend)
-        uses: actions/checkout@v4
-        with:
-          repository: Positronic-AI/positronic-lit
-          ref: ${{ inputs.lib_ref }}
-          token: ${{ secrets.LIT_LIB_TOKEN }}
-          path: positronic-lit
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -70,19 +62,26 @@ jobs:
           echo "LIT_BRIDGE_RS_BUNDLE=$BIN" >> "$GITHUB_ENV"
           echo "native bridge built + signed: $BIN"
 
-      - name: Freeze the backend (PyInstaller)
-        working-directory: positronic-lit
+      - name: Freeze the backend (PyInstaller, from public wheel)
+        working-directory: backend
         run: |
-          python -m pip install --upgrade pip
-          pip install . pyinstaller
-          PYTHONPATH=src pyinstaller --noconfirm lit-server.spec
+          python -m pip install --upgrade pip pyinstaller
+          # Install the compiled backend from the PUBLIC releases (no lit-lib source).
+          curl -fsSL -o install.py https://github.com/Positronic-AI/lit-releases/releases/latest/download/install.py
+          VER="${{ inputs.lib_version }}"
+          if [ -n "$VER" ] && [ "$VER" != "latest" ]; then
+            python install.py --version "$VER"
+          else
+            python install.py
+          fi
+          pyinstaller --noconfirm lit-server.spec
 
       - name: Stage the frozen backend as the Tauri sidecar
         run: |
           TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
           echo "host triple: $TRIPLE"
           mkdir -p src-tauri/binaries
-          cp "positronic-lit/dist/lit-server" "src-tauri/binaries/lit-server-${TRIPLE}"
+          cp "backend/dist/lit-server" "src-tauri/binaries/lit-server-${TRIPLE}"
           chmod +x "src-tauri/binaries/lit-server-${TRIPLE}"
 
       - name: Build the branded .dmg
