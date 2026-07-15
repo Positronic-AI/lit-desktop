@@ -100,15 +100,26 @@ jobs:
           path: src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
-      - name: Publish GitHub Release
+      # litai -> public releases repo, rolling "latest" with a stable asset name.
+      # jovai -> this repo, per-version (tester builds for Nate).
+      - name: Publish
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ inputs.brand == 'litai' && secrets.RELEASES_TOKEN || github.token }}
         run: |
           DMG=$(find src-tauri/target/release/bundle/dmg -name "*.dmg" | head -1)
-          TAG="${{ inputs.brand }}-v${LIT_BUILD_VERSION}"
-          echo "publishing $TAG with $DMG"
-          gh release create "$TAG" "$DMG" \
-            --repo "${{ github.repository }}" \
-            --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (macOS - Apple Silicon)" \
-            --notes "Unsigned tester build (Apple Silicon). Install: open the .dmg, drag the app to Applications, then run 'xattr -cr /Applications/<App>.app' once and open it. Full Developer-ID signing/notarization is coming; until then the xattr step clears the download quarantine." \
-            --latest
+          if [ "${{ inputs.brand }}" = "litai" ]; then
+            cp "$DMG" "LIT-Desktop-macOS-arm64.dmg"
+            REPO="Positronic-AI/lit-desktop-releases"
+            gh release view latest --repo "$REPO" >/dev/null 2>&1 || \
+              gh release create latest --repo "$REPO" --title "LIT Desktop (latest)" \
+                --notes "Latest LIT Desktop installers for macOS, Windows, and Linux. Unsigned early-access builds." --latest
+            gh release upload latest "LIT-Desktop-macOS-arm64.dmg" --repo "$REPO" --clobber
+            echo "published macOS ${LIT_BUILD_VERSION} to $REPO/releases/latest"
+          else
+            TAG="${{ inputs.brand }}-v${LIT_BUILD_VERSION}"
+            gh release create "$TAG" "$DMG" \
+              --repo "${{ github.repository }}" \
+              --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (macOS - Apple Silicon)" \
+              --notes "Unsigned tester build (Apple Silicon). Open the .dmg, drag to Applications, then 'xattr -cr' the app once." \
+              --latest
+          fi

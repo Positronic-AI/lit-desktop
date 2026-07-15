@@ -1,7 +1,6 @@
-name: Build Windows Installer
+name: Build Linux Packages
 
-# Manual trigger — builds a branded, unsigned Windows installer (.msi + NSIS .exe)
-# for testers. Mirrors the macOS workflow.
+# Manual trigger — builds branded .deb + .rpm packages for testers.
 # The backend is installed from the PUBLIC pre-built wheel (Positronic-AI/
 # lit-releases) — this repo needs NO access to lit-lib source and NO token.
 on:
@@ -20,15 +19,11 @@ on:
         default: ""
 
 jobs:
-  build-windows:
-    runs-on: windows-latest # x86_64-pc-windows-msvc
+  build-linux:
+    runs-on: ubuntu-latest # x86_64-unknown-linux-gnu
     permissions:
-      contents: write # to publish the release
-    defaults:
-      run:
-        shell: bash # bash for parity with build-brand.sh; Git Bash ships on the runner
+      contents: write
     env:
-      # Auto-incrementing build version: each run bumps the patch. Override via input.
       LIT_BUILD_VERSION: ${{ inputs.version || format('2.0.{0}', github.run_number) }}
     steps:
       - name: Checkout lit-desktop
@@ -47,6 +42,12 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Tauri Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf rpm
+
       - name: Checkout lit-bridge-rs (native bridge, public)
         uses: actions/checkout@v4
         with:
@@ -56,22 +57,15 @@ jobs:
 
       - name: Build the native bridge
         run: |
-          cd lit-bridge-rs-src
-          cargo build --release
-          # pwd -W yields a Windows-style path (D:/a/...) that Python's
-          # os.path.exists in the spec can read; the MSYS /d/... form can't.
-          echo "LIT_BRIDGE_RS_BUNDLE=$(pwd -W)/target/release/lit-bridge-rs.exe" >> "$GITHUB_ENV"
-          echo "native bridge built: $(pwd -W)/target/release/lit-bridge-rs.exe"
+          cargo build --release --manifest-path "$GITHUB_WORKSPACE/lit-bridge-rs-src/Cargo.toml"
+          echo "LIT_BRIDGE_RS_BUNDLE=$GITHUB_WORKSPACE/lit-bridge-rs-src/target/release/lit-bridge-rs" >> "$GITHUB_ENV"
 
       - name: Freeze the backend (PyInstaller, from public wheel)
         working-directory: backend
         env:
-          # install.py prints a box-drawing banner; force UTF-8 so its stdout
-          # doesn't crash under the Windows runner's default cp1252 codec.
           PYTHONUTF8: "1"
         run: |
           python -m pip install --upgrade pip pyinstaller
-          # Install the compiled backend from the PUBLIC releases (no lit-lib source).
           curl -fsSL -o install.py https://github.com/Positronic-AI/lit-releases/releases/latest/download/install.py
           VER="${{ inputs.lib_version }}"
           if [ -n "$VER" ] && [ "$VER" != "latest" ]; then
@@ -86,43 +80,46 @@ jobs:
           TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
           echo "host triple: $TRIPLE"
           mkdir -p src-tauri/binaries
-          cp "backend/dist/lit-server.exe" "src-tauri/binaries/lit-server-${TRIPLE}.exe"
+          cp "backend/dist/lit-server" "src-tauri/binaries/lit-server-${TRIPLE}"
+          chmod +x "src-tauri/binaries/lit-server-${TRIPLE}"
 
-      - name: Build the branded installer
+      - name: Build the branded packages
         run: |
           npm install
           ./scripts/build-brand.sh "${{ inputs.brand }}"
 
-      - name: Upload installer artifacts
+      - name: Upload package artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.brand }}-windows-installer
+          name: ${{ inputs.brand }}-linux-packages
           path: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
           if-no-files-found: error
 
-      # litai -> public releases repo, rolling "latest" with stable asset names.
-      # jovai -> this repo, per-version (tester builds).
+      # Public downloads go to the dedicated releases repo (litai only) under a
+      # rolling "latest" release with STABLE, version-less asset names, so the
+      # install page can link to permanent /releases/latest/download/<name> URLs.
+      # jovai (white-label) tester builds stay in this repo, per-version.
       - name: Publish
         env:
           GH_TOKEN: ${{ inputs.brand == 'litai' && secrets.RELEASES_TOKEN || github.token }}
         run: |
-          MSI=$(find src-tauri/target/release/bundle/msi -name "*.msi" | head -1)
-          NSIS=$(find src-tauri/target/release/bundle/nsis -name "*-setup.exe" | head -1)
+          DEB=$(find src-tauri/target/release/bundle/deb -name "*.deb" | head -1)
+          RPM=$(find src-tauri/target/release/bundle/rpm -name "*.rpm" | head -1)
           if [ "${{ inputs.brand }}" = "litai" ]; then
-            cp "$MSI" "LIT-Desktop-Windows-x64.msi"
-            cp "$NSIS" "LIT-Desktop-Windows-x64-setup.exe"
+            cp "$DEB" "LIT-Desktop-Linux-x64.deb"
+            cp "$RPM" "LIT-Desktop-Linux-x64.rpm"
             REPO="Positronic-AI/lit-desktop-releases"
             gh release view latest --repo "$REPO" >/dev/null 2>&1 || \
               gh release create latest --repo "$REPO" --title "LIT Desktop (latest)" \
                 --notes "Latest LIT Desktop installers for macOS, Windows, and Linux. Unsigned early-access builds." --latest
-            gh release upload latest "LIT-Desktop-Windows-x64.msi" "LIT-Desktop-Windows-x64-setup.exe" --repo "$REPO" --clobber
-            echo "published Windows ${LIT_BUILD_VERSION} to $REPO/releases/latest"
+            gh release upload latest "LIT-Desktop-Linux-x64.deb" "LIT-Desktop-Linux-x64.rpm" --repo "$REPO" --clobber
+            echo "published Linux ${LIT_BUILD_VERSION} to $REPO/releases/latest"
           else
-            TAG="${{ inputs.brand }}-win-v${LIT_BUILD_VERSION}"
-            gh release create "$TAG" "$MSI" "$NSIS" \
+            TAG="${{ inputs.brand }}-linux-v${LIT_BUILD_VERSION}"
+            gh release create "$TAG" "$DEB" "$RPM" \
               --repo "${{ github.repository }}" \
-              --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (Windows x64)" \
-              --notes "Unsigned tester build (Windows x64). SmartScreen will warn on an unsigned installer - click 'More info' then 'Run anyway'."
+              --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (Linux)" \
+              --notes "Unsigned tester build (Linux x86_64). Install the .deb or .rpm."
           fi
