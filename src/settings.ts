@@ -134,7 +134,7 @@ function buildShell(): HTMLElement {
 function renderSetup(): void {
   bodyEl.innerHTML = "";
   const connSection = el("div", "setup-section");
-  connSection.appendChild(el("h3", "setup-section-title", "Connections"));
+  connSection.appendChild(el("h3", "setup-section-title", "Credentials"));
   connRoot = el("div", "setup-section-body");
   connSection.appendChild(connRoot);
 
@@ -164,7 +164,7 @@ async function renderConnections(): Promise<void> {
   }
   root.innerHTML = "";
 
-  const intro = el("p", "settings-intro", "A Connection is a reusable credential you bind to agents — a subscription login or a metered API key.");
+  const intro = el("p", "settings-intro", "A Credential is a subscription login or a metered API key that you bind to agents.");
   root.appendChild(intro);
 
   if (creds.length === 0) {
@@ -703,7 +703,7 @@ async function openAgentForm(agentId: string | null): Promise<void> {
 
   form.append(
     field("Name", nameInput),
-    field("Connection", credSel),
+    field("Credential", credSel),
     field("Backend", backendSel),
     field("Model", modelSel),
     el("div", "form-section-label", "Role"),

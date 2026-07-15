@@ -36,6 +36,10 @@ import { openTerminal, closeTerminal, isTerminalOpen, fitToGrid } from "./termin
 import { brand } from "./brand";
 
 let backendProcess: Child | null = null;
+// Set by startBackend() when the backend fails to start, so the failure dialog
+// can show the real reason (e.g. a Tauri spawn rejection) instead of only
+// pointing at a log that's empty when the backend never ran.
+let backendStartError: string | null = null;
 
 // Where the backend tees its stdout/stderr (see lit-server-entry.py). Kept in
 // sync with the _BASE path baked into the frozen backend.
@@ -48,6 +52,7 @@ async function backendLogPath(): Promise<string> {
 }
 
 async function startBackend(): Promise<boolean> {
+  backendStartError = null;
   if (await checkConnection()) return true;
 
   try {
@@ -61,17 +66,23 @@ async function startBackend(): Promise<boolean> {
     backendProcess = await cmd.spawn();
     console.log("[backend] spawned, waiting for health check...");
   } catch (e) {
+    // A spawn rejection (e.g. a shell-scope/capability denial) never writes to
+    // the backend log — the backend never ran — so capture it for the UI.
+    backendStartError = `Could not launch the backend process: ${String((e as any)?.message ?? e)}`;
     console.error("[backend] failed to spawn sidecar:", e);
     return false;
   }
 
-  for (let i = 0; i < 30; i++) {
+  // 90s, not 30s: a Windows first-run cold start extracts the onefile and
+  // Defender scans every file, which can exceed 30s on the very first launch.
+  for (let i = 0; i < 90; i++) {
     await new Promise((r) => setTimeout(r, 1000));
     if (await checkConnection()) {
       console.log("[backend] ready");
       return true;
     }
   }
+  backendStartError = "The backend started but did not become reachable within 90 seconds.";
   console.error("[backend] timed out waiting for server");
   return false;
 }
@@ -1556,11 +1567,19 @@ function connectWebSocket(channelId: string) {
     try {
       const data = JSON.parse(event.data);
 
+      // Suppress an outbound (assistant) message that lands right after
+      // stream_end — the live stream already rendered its content. Matches the
+      // webapp's 5s window. Only active when the stream actually had content, so
+      // a failed/empty stream never hides the authoritative persisted message.
+      const suppressAfterStream = (direction?: string) =>
+        direction !== "in" && lastStreamEndTime > 0 && Date.now() - lastStreamEndTime < 5000;
+
       if (data.type === "new_messages" && Array.isArray(data.messages)) {
         let added = false;
         for (const msg of data.messages) {
           if (knownMessageIds.has(msg.id)) continue;
           knownMessageIds.add(msg.id);
+          if (suppressAfterStream(msg.direction)) continue;
           added = true;
           renderMessage({
             role: msg.direction === "in" ? "user" : "assistant",
@@ -1578,22 +1597,28 @@ function connectWebSocket(channelId: string) {
       } else if (data.id && data.content && data.direction) {
         if (!knownMessageIds.has(data.id)) {
           knownMessageIds.add(data.id);
-          renderMessage({
-            role: data.direction === "in" ? "user" : "assistant",
-            content: data.content,
-            id: data.id,
-            from: data.from,
-            timestamp: data.timestamp,
-            file_path: data.file_path,
-            metadata: data.metadata,
-          });
-          if (streamingEl && data.direction === "in") {
-            messagesEl.appendChild(streamingEl);
+          if (!suppressAfterStream(data.direction)) {
+            renderMessage({
+              role: data.direction === "in" ? "user" : "assistant",
+              content: data.content,
+              id: data.id,
+              from: data.from,
+              timestamp: data.timestamp,
+              file_path: data.file_path,
+              metadata: data.metadata,
+            });
+            if (streamingEl && data.direction === "in") {
+              messagesEl.appendChild(streamingEl);
+            }
           }
           if (document.visibilityState === "visible") {
             markChannelRead(channelId).catch(() => {});
           }
         }
+      } else if (data.type === "thinking") {
+        // Agent is connecting — show the streaming bubble early so a missed
+        // stream_start never causes the first content frames to be dropped.
+        if (!streamingEl) showTypingIndicator();
       } else if (data.type === "stream_start") {
         streamingChannels.add(channelId);
         activeStreamId = data.stream_id || null;
@@ -1602,11 +1627,23 @@ function connectWebSocket(channelId: string) {
         cancelStreamBtn.style.display = "";
       } else if (data.type === "stream_chunk" && data.content) {
         appendStreamToken(data.content);
+      } else if (data.type === "stream_replace") {
+        // Full content each frame (JSONL-sourced bridge + replay). Previously
+        // ignored by the desktop, so those frames never rendered live.
+        setStreamContent(data.content || "");
       } else if (data.type === "stream_end") {
         streamingChannels.delete(channelId);
         activeStreamId = null;
         renderSidebarIndicators();
+        // Prefer the authoritative content carried on stream_end (JSONL-sourced)
+        // over the accumulated chunks — this recovers the full response even if
+        // some live chunks were missed in transit.
+        if (typeof data.content === "string" && data.content) {
+          setStreamContent(data.content);
+        }
+        const hadContent = !!streamingText.trim();
         finalizeStream();
+        lastStreamEndTime = hadContent ? Date.now() : 0;
         cancelStreamBtn.style.display = "none";
       }
     } catch {
@@ -1664,6 +1701,9 @@ document.addEventListener("visibilitychange", () => {
 
 let streamingEl: HTMLElement | null = null;
 let streamingText = "";
+// Timestamp of the last stream_end that carried content — used to suppress the
+// duplicate persisted assistant message that arrives just after (webapp parity).
+let lastStreamEndTime = 0;
 
 function showTypingIndicator() {
   removeTypingIndicator();
@@ -1677,9 +1717,22 @@ function showTypingIndicator() {
   streamingEl = el;
 }
 
+// stream_chunk carries a delta (append); stream_replace carries the full
+// content each frame (the JSONL-sourced bridge emits these). The webapp's
+// channel view handles both — the desktop previously only handled append,
+// so replace frames rendered nothing live.
 function appendStreamToken(token: string) {
-  if (!streamingEl) showTypingIndicator();
   streamingText += token;
+  renderStreamingText();
+}
+
+function setStreamContent(full: string) {
+  streamingText = full;
+  renderStreamingText();
+}
+
+function renderStreamingText() {
+  if (!streamingEl) showTypingIndicator();
 
   // During streaming, do a live parse and re-render parts
   const header = streamingEl!.querySelector(".message-header");
@@ -1978,6 +2031,7 @@ async function init() {
       role: "system",
       content:
         "**Failed to start the LIT backend.**\n\n" +
+        (backendStartError ? backendStartError + "\n\n" : "") +
         "The full startup log (including any error) was written to:\n\n" +
         "`" + logPath + "`",
     });
