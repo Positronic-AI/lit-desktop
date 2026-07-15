@@ -64,6 +64,10 @@ jobs:
 
       - name: Freeze the backend (PyInstaller, from public wheel)
         working-directory: backend
+        env:
+          # install.py prints a box-drawing banner; force UTF-8 for parity with
+          # the Windows job (harmless on macOS, which already defaults to UTF-8).
+          PYTHONUTF8: "1"
         run: |
           python -m pip install --upgrade pip pyinstaller
           # Install the compiled backend from the PUBLIC releases (no lit-lib source).
