@@ -101,7 +101,7 @@ export function openSettings(
   overlay.appendChild(buildShell());
   overlay.classList.add("active");
   pendingAgentId = target?.agentId || null;
-  selectTab(target?.tab || (target?.agentId ? "agents" : "connections"));
+  renderSetup();
 }
 
 function closeSettings(): void {
@@ -110,55 +110,62 @@ function closeSettings(): void {
 }
 
 let bodyEl: HTMLElement;
-let tabBtns: Record<string, HTMLElement> = {};
+let connRoot: HTMLElement;   // content container for the Connections section
+let agentRoot: HTMLElement;  // content container for the Agents section
 
 function buildShell(): HTMLElement {
   const modal = el("div", "settings-modal");
 
   const header = el("div", "settings-header");
-  const title = el("h2", undefined, "Settings");
+  const title = el("h2", undefined, "Setup");
   const close = el("button", "settings-close", "×");
   close.title = "Close";
   close.addEventListener("click", closeSettings);
   header.append(title, close);
 
-  const tabs = el("div", "settings-tabs");
-  tabBtns = {};
-  for (const [id, label] of [["connections", "Connections"], ["agents", "Agents"]]) {
-    const b = el("button", "settings-tab", label);
-    b.addEventListener("click", () => selectTab(id));
-    tabBtns[id] = b;
-    tabs.appendChild(b);
-  }
-
   bodyEl = el("div", "settings-body");
-  modal.append(header, tabs, bodyEl);
+  modal.append(header, bodyEl);
   return modal;
 }
 
-function selectTab(id: string): void {
-  for (const [k, b] of Object.entries(tabBtns)) b.classList.toggle("active", k === id);
+// Single Setup screen: Connections and Agents stacked as two sections, so Agents
+// is never hidden behind a tab (mirrors the web app's Setup wizard, where users
+// kept missing that they still needed to create an agent).
+function renderSetup(): void {
   bodyEl.innerHTML = "";
-  bodyEl.appendChild(el("div", "settings-loading", "Loading…"));
-  if (id === "connections") renderConnections();
-  else renderAgents();
+  const connSection = el("div", "setup-section");
+  connSection.appendChild(el("h3", "setup-section-title", "Connections"));
+  connRoot = el("div", "setup-section-body");
+  connSection.appendChild(connRoot);
+
+  const agentSection = el("div", "setup-section");
+  agentSection.appendChild(el("h3", "setup-section-title", "Agents"));
+  agentRoot = el("div", "setup-section-body");
+  agentSection.appendChild(agentRoot);
+
+  bodyEl.append(connSection, agentSection);
+  renderConnections();
+  renderAgents();
 }
 
 // --- Connections tab -------------------------------------------------------
 
 async function renderConnections(): Promise<void> {
+  const root = connRoot;
+  root.innerHTML = "";
+  root.appendChild(el("div", "settings-loading", "Loading…"));
   let creds: Credential[] = [];
   try {
     creds = await listCredentials();
   } catch (e) {
-    bodyEl.innerHTML = "";
-    bodyEl.appendChild(el("div", "settings-error", "Failed to load connections."));
+    root.innerHTML = "";
+    root.appendChild(el("div", "settings-error", "Failed to load connections."));
     return;
   }
-  bodyEl.innerHTML = "";
+  root.innerHTML = "";
 
   const intro = el("p", "settings-intro", "A Connection is a reusable credential you bind to agents — a subscription login or a metered API key.");
-  bodyEl.appendChild(intro);
+  root.appendChild(intro);
 
   if (creds.length === 0) {
     const empty = el("div", "settings-empty");
@@ -166,16 +173,16 @@ async function renderConnections(): Promise<void> {
       el("p", undefined, "No connections yet."),
       el("p", "muted", "Add your Claude subscription or an API key to get started."),
     );
-    bodyEl.appendChild(empty);
+    root.appendChild(empty);
   }
 
   const list = el("div", "cred-list");
   for (const c of creds) list.appendChild(credCard(c));
-  bodyEl.appendChild(list);
+  root.appendChild(list);
 
   const add = el("button", "settings-primary-btn", "+ New connection");
   add.addEventListener("click", () => openCreateWizard());
-  bodyEl.appendChild(add);
+  root.appendChild(add);
 }
 
 function credCard(c: Credential): HTMLElement {
@@ -373,13 +380,13 @@ function openCreateWizard(): void {
         const cred = await createCredential({ id: slug(name), name, vendor: state.vendor!, mode: state.mode! });
         if (isKey) {
           await setCredentialApiKey(cred.id!, keyInput!.value.trim());
-          renderConnections();
+          renderSetup();
         } else {
           // subscription → OAuth
           const host = el("div");
           panel.innerHTML = "";
           panel.appendChild(host);
-          runOAuth(host, cred, () => renderConnections());
+          runOAuth(host, cred, () => renderSetup());
         }
       } catch (e) {
         go.textContent = isKey ? "Create & connect" : "Create & sign in";
@@ -394,8 +401,8 @@ function openCreateWizard(): void {
   };
 
   bodyEl.innerHTML = "";
-  const cancel = el("button", "settings-mini-btn ghost", "← All connections");
-  cancel.addEventListener("click", () => renderConnections());
+  const cancel = el("button", "settings-mini-btn ghost", "← Back to setup");
+  cancel.addEventListener("click", () => renderSetup());
   bodyEl.append(cancel, panel);
   render();
 }
@@ -459,7 +466,7 @@ async function runOAuth(host: HTMLElement, c: Credential, done?: () => void): Pr
     submit.setAttribute("disabled", "true");
     try {
       const r = await submitOAuthCode(backend, session!.session_id, codeInput.value.trim());
-      if (r.status === "authenticated" || !r.error) { if (done) done(); else renderConnections(); }
+      if (r.status === "authenticated" || !r.error) { if (done) done(); else renderSetup(); }
       else throw new Error(r.error || "failed");
     } catch {
       submit.textContent = "Submit code";
@@ -469,7 +476,7 @@ async function runOAuth(host: HTMLElement, c: Credential, done?: () => void): Pr
     }
   });
   const cancel = el("button", "settings-mini-btn ghost", "Cancel");
-  cancel.addEventListener("click", () => { cancelOAuth(backend, session!.session_id); renderConnections(); });
+  cancel.addEventListener("click", () => { cancelOAuth(backend, session!.session_id); renderSetup(); });
   box.append(submit, err, cancel);
   host.appendChild(box);
 }
@@ -497,6 +504,9 @@ function modelsFor(agent: { backend: string; model?: string; credentials_id?: st
 }
 
 async function renderAgents(): Promise<void> {
+  const root = agentRoot;
+  root.innerHTML = "";
+  root.appendChild(el("div", "settings-loading", "Loading…"));
   let agents: FullAgent[] = [];
   try {
     const [a, m, creds] = await Promise.all([fetchFullAgents(), fetchModelsWithConstraints(), listCredentials()]);
@@ -505,31 +515,31 @@ async function renderAgents(): Promise<void> {
     modelConstraints = m.constraints;
     credCache = creds;
   } catch {
-    bodyEl.innerHTML = "";
-    bodyEl.appendChild(el("div", "settings-error", "Failed to load agents."));
+    root.innerHTML = "";
+    root.appendChild(el("div", "settings-error", "Failed to load agents."));
     return;
   }
-  bodyEl.innerHTML = "";
-  // Jump straight to a form when opened via the + button or a per-agent gear.
+  root.innerHTML = "";
+  // Opened via the + button or a per-agent gear → jump straight to the form
+  // (a focused, full-screen flow that returns to the Setup screen).
   if (pendingAgentId) {
     const id = pendingAgentId;
     pendingAgentId = null;
     openAgentForm(id === "new" ? null : id);
     return;
   }
-  bodyEl.appendChild(el("p", "settings-intro", "Agents are your Claudes. Each binds to a Connection and a model."));
 
   if (agents.length === 0) {
-    bodyEl.appendChild(el("div", "settings-empty", "No agents yet."));
+    root.appendChild(el("div", "settings-empty", "No agents yet — create one to start chatting."));
   }
 
   const list = el("div", "agent-rows");
   for (const a of agents) list.appendChild(agentRow(a));
-  bodyEl.appendChild(list);
+  root.appendChild(list);
 
   const add = el("button", "settings-primary-btn", "+ New agent");
   add.addEventListener("click", () => openAgentForm(null));
-  bodyEl.appendChild(add);
+  root.appendChild(add);
 }
 
 function agentRow(a: FullAgent): HTMLElement {
@@ -605,8 +615,8 @@ async function patchAgent(agentId: string, changes: Partial<FullAgent>): Promise
 
 async function openAgentForm(agentId: string | null): Promise<void> {
   bodyEl.innerHTML = "";
-  const back = el("button", "settings-mini-btn ghost", "← All agents");
-  back.addEventListener("click", () => renderAgents());
+  const back = el("button", "settings-mini-btn ghost", "← Back to setup");
+  back.addEventListener("click", () => renderSetup());
   bodyEl.appendChild(back);
 
   const form = el("div", "agent-form");
@@ -726,7 +736,7 @@ async function openAgentForm(agentId: string | null): Promise<void> {
         temperature: parseFloat(tempInput.value) || 0.7,
         effort: effortSel.value || null,
       });
-      renderAgents();
+      renderSetup();
     } catch {
       save.textContent = agentId ? "Save agent" : "Create agent";
       save.removeAttribute("disabled");

@@ -1841,3 +1841,10 @@ kbd {
 .agent-tab-add { cursor: pointer; }
 
 .message-content .brand-logo { display: block; max-width: 220px; height: auto; margin: 4px 0 14px; }
+
+/* Setup screen: Connections + Agents stacked as sections (no tabs) */
+.setup-section { margin-bottom: 26px; }
+.setup-section-title {
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+  margin: 0 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+}
