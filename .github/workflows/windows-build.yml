@@ -87,11 +87,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          MSI=$(find src-tauri/target/release/bundle/msi -name "*.msi" | head -1)
-          NSIS=$(find src-tauri/target/release/bundle/nsis -name "*-setup.exe" | head -1)
+          # Collect assets into an array — installer filenames contain spaces
+          # (e.g. "LIT Desktop_2.0.1_x64_en-US.msi"), so unquoted globbing breaks.
+          ASSETS=()
+          while IFS= read -r f; do ASSETS+=("$f"); done < <(
+            find src-tauri/target/release/bundle/msi -name "*.msi"
+            find src-tauri/target/release/bundle/nsis -name "*-setup.exe"
+          )
           TAG="${{ inputs.brand }}-win-v${LIT_BUILD_VERSION}"
-          echo "publishing $TAG with $MSI $NSIS"
-          gh release create "$TAG" $MSI $NSIS \
+          echo "publishing $TAG with ${ASSETS[*]}"
+          gh release create "$TAG" "${ASSETS[@]}" \
             --repo "${{ github.repository }}" \
             --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (Windows x64)" \
             --notes "Unsigned tester build (Windows x64). Install via the .msi (or the NSIS -setup.exe). Windows SmartScreen will warn on an unsigned installer — click 'More info' then 'Run anyway'. Authenticode signing is coming later; until then the SmartScreen step is expected."
