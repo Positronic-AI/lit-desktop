@@ -29,7 +29,26 @@ def _keep(entry):
     return True
 
 datas += [d for d in collect_data_files('lit') if _keep(d)]
-hiddenimports += collect_submodules('lit')
+
+# collect_submodules('lit') relies on pkgutil walking the package by IMPORTING
+# each subpackage to recurse — but `lit` is Cython-compiled, and compiled
+# subpackages don't always expose a walkable __path__, so submodules get missed
+# (e.g. ModuleNotFoundError: No module named 'lit.mux.utils' at runtime). Walk
+# the installed package on disk instead and register every compiled/py submodule
+# explicitly — bulletproof for a compiled package.
+import importlib.util as _ilu
+_lit_origin = _ilu.find_spec('lit').origin          # .../site-packages/lit/__init__.py
+_lit_dir = os.path.dirname(_lit_origin)              # .../site-packages/lit
+_site_root = os.path.dirname(_lit_dir)               # .../site-packages
+for _root, _dirs, _files in os.walk(_lit_dir):
+    for _f in _files:
+        if _f.endswith(('.pyd', '.so', '.py')):
+            _base = _f.split('.')[0]                 # 'utils' from 'utils.cpython-312-...so'
+            if not _base or _base.startswith('__'):
+                continue
+            _rel = os.path.relpath(_root, _site_root)
+            hiddenimports.append(_rel.replace(os.sep, '.') + '.' + _base)
+hiddenimports += collect_submodules('lit')           # belt-and-suspenders
 hiddenimports += collect_submodules('uvicorn')
 
 # CRITICAL for the wheel-based build: `lit` ships as Cython-compiled extensions
