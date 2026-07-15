@@ -51,6 +51,25 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Checkout lit-bridge-rs (native bridge, public)
+        uses: actions/checkout@v4
+        with:
+          repository: Positronic-AI/lit-bridge-rs
+          ref: main
+          path: lit-bridge-rs-src
+
+      - name: Build + ad-hoc sign the native bridge
+        run: |
+          cargo build --release --manifest-path "$GITHUB_WORKSPACE/lit-bridge-rs-src/Cargo.toml"
+          BIN="$GITHUB_WORKSPACE/lit-bridge-rs-src/target/release/lit-bridge-rs"
+          # Ad-hoc sign so Apple Silicon will exec it as a subprocess. Standalone
+          # binary (no dylib loading from us), so plain ad-hoc is sufficient.
+          codesign --force --sign - --timestamp=none "$BIN"
+          # The PyInstaller spec bundles this verbatim (datas) so the signature
+          # survives; the entry point resolves it and sets LIT_BRIDGE_RS_BIN.
+          echo "LIT_BRIDGE_RS_BUNDLE=$BIN" >> "$GITHUB_ENV"
+          echo "native bridge built + signed: $BIN"
+
       - name: Freeze the backend (PyInstaller)
         working-directory: positronic-lit
         run: |

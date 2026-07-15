@@ -55,6 +55,22 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Checkout lit-bridge-rs (native bridge, public)
+        uses: actions/checkout@v4
+        with:
+          repository: Positronic-AI/lit-bridge-rs
+          ref: main
+          path: lit-bridge-rs-src
+
+      - name: Build the native bridge
+        run: |
+          cd lit-bridge-rs-src
+          cargo build --release
+          # pwd -W yields a Windows-style path (D:/a/...) that Python's
+          # os.path.exists in the spec can read; the MSYS /d/... form can't.
+          echo "LIT_BRIDGE_RS_BUNDLE=$(pwd -W)/target/release/lit-bridge-rs.exe" >> "$GITHUB_ENV"
+          echo "native bridge built: $(pwd -W)/target/release/lit-bridge-rs.exe"
+
       - name: Freeze the backend (PyInstaller)
         working-directory: positronic-lit
         run: |

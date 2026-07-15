@@ -59,7 +59,10 @@ export interface BackendModel {
 export type ThrottleState = "disabled" | "enabled" | "safe" | "stopped";
 
 const DEFAULT_SERVER: ServerConfig = {
-  url: "http://localhost:5000",
+  // 127.0.0.1, not "localhost": on Windows localhost can resolve to IPv6 ::1
+  // first, but the backend binds IPv4 127.0.0.1 only — so localhost fails to
+  // connect there. 127.0.0.1 hits the exact bind address on every platform.
+  url: "http://127.0.0.1:5000",
   name: "Local",
 };
 

@@ -28,6 +28,7 @@ import {
   type ThrottleState,
 } from "./api";
 import { open } from "@tauri-apps/plugin-dialog";
+import { homeDir, join } from "@tauri-apps/api/path";
 import { Command as ShellCommand, type Child } from "@tauri-apps/plugin-shell";
 import { renderMarkdown } from "./markdown";
 import { openSettings } from "./settings";
@@ -35,6 +36,16 @@ import { openTerminal, closeTerminal, isTerminalOpen, fitToGrid } from "./termin
 import { brand } from "./brand";
 
 let backendProcess: Child | null = null;
+
+// Where the backend tees its stdout/stderr (see lit-server-entry.py). Kept in
+// sync with the _BASE path baked into the frozen backend.
+async function backendLogPath(): Promise<string> {
+  try {
+    return await join(await homeDir(), ".local", "share", "lit-desktop", "logs", "backend.log");
+  } catch {
+    return "~/.local/share/lit-desktop/logs/backend.log";
+  }
+}
 
 async function startBackend(): Promise<boolean> {
   if (await checkConnection()) return true;
@@ -1962,9 +1973,13 @@ async function init() {
   if (!connected) {
     setStatus("disconnected");
     clearMessages();
+    const logPath = await backendLogPath();
     renderMessage({
       role: "system",
-      content: "Failed to start LIT backend. Check the console for details.",
+      content:
+        "**Failed to start the LIT backend.**\n\n" +
+        "The full startup log (including any error) was written to:\n\n" +
+        "`" + logPath + "`",
     });
     const retry = setInterval(async () => {
       setStatus("connecting");
