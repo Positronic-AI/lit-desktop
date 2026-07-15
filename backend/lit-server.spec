@@ -32,6 +32,31 @@ datas += [d for d in collect_data_files('lit') if _keep(d)]
 hiddenimports += collect_submodules('lit')
 hiddenimports += collect_submodules('uvicorn')
 
+# CRITICAL for the wheel-based build: `lit` ships as Cython-compiled extensions
+# (.pyd/.so), and PyInstaller CANNOT trace imports through compiled modules — so
+# it never discovers the third-party packages `lit` imports and silently omits
+# them, producing a binary that crashes at runtime with ModuleNotFoundError
+# (e.g. 'fastapi'). When building from source PyInstaller read the .py and found
+# them; from the wheel we must list them explicitly. These are the runtime
+# dependencies from positronic-lit's pyproject.toml, by IMPORT name. PyInstaller
+# traces each one's own (pure-Python) transitive imports from here.
+_RUNTIME_DEPS = [
+    'fastapi', 'uvicorn', 'pydantic', 'aiofiles', 'multipart', 'click', 'rich',
+    'toml', 'jwt', 'httpx', 'aiohttp', 'asyncssh', 'mcp', 'fastmcp', 'anthropic',
+    'google.generativeai', 'tiktoken', 'yaml', 'ollama', 'croniter',
+    'cryptography', 'dotenv', 'requests', 'psutil', 'typing_extensions', 'pytz',
+    'dateutil', 'tqdm', 'filelock', 'urllib3', 'watchfiles', 'websocket',
+    'socketio',
+]
+hiddenimports += _RUNTIME_DEPS
+# Packages with lazily-imported submodules / bundled data need a full collect so
+# nothing is missed (starlette powers fastapi; certifi handled above).
+for _pkg in ('fastapi', 'starlette', 'anthropic', 'mcp', 'fastmcp'):
+    try:
+        hiddenimports += collect_submodules(_pkg)
+    except Exception:
+        pass
+
 # Bundle certifi + its CA file so TLS verification works in the frozen binary.
 hiddenimports += ['certifi']
 datas += collect_data_files('certifi')
