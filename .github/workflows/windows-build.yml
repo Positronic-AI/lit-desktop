@@ -1,0 +1,97 @@
+name: Build Windows Installer
+
+# Manual trigger — builds a branded, unsigned Windows installer (.msi + NSIS .exe)
+# for testers. Mirrors the macOS workflow.
+# Requires repo secret LIT_LIB_TOKEN: a token with read access to
+# Positronic-AI/positronic-lit (to build the frozen backend on the runner).
+on:
+  workflow_dispatch:
+    inputs:
+      brand:
+        description: "Brand to build"
+        type: choice
+        options: [jovai, litai]
+        default: litai
+      lib_ref:
+        description: "positronic-lit branch/ref"
+        default: develop
+      version:
+        description: "Version override (blank → auto 2.0.<run number>)"
+        default: ""
+
+jobs:
+  build-windows:
+    runs-on: windows-latest # x86_64-pc-windows-msvc
+    permissions:
+      contents: write # to publish the release
+    defaults:
+      run:
+        shell: bash # bash for parity with build-brand.sh; Git Bash ships on the runner
+    env:
+      # Auto-incrementing build version: each run bumps the patch. Override via input.
+      LIT_BUILD_VERSION: ${{ inputs.version || format('2.0.{0}', github.run_number) }}
+    steps:
+      - name: Checkout lit-desktop
+        uses: actions/checkout@v4
+
+      - name: Checkout positronic-lit (the backend)
+        uses: actions/checkout@v4
+        with:
+          repository: Positronic-AI/positronic-lit
+          ref: ${{ inputs.lib_ref }}
+          token: ${{ secrets.LIT_LIB_TOKEN }}
+          path: positronic-lit
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Freeze the backend (PyInstaller)
+        working-directory: positronic-lit
+        run: |
+          python -m pip install --upgrade pip
+          pip install . pyinstaller
+          PYTHONPATH=src pyinstaller --noconfirm lit-server.spec
+
+      - name: Stage the frozen backend as the Tauri sidecar
+        run: |
+          TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
+          echo "host triple: $TRIPLE"
+          mkdir -p src-tauri/binaries
+          cp "positronic-lit/dist/lit-server.exe" "src-tauri/binaries/lit-server-${TRIPLE}.exe"
+
+      - name: Build the branded installer
+        run: |
+          npm install
+          ./scripts/build-brand.sh "${{ inputs.brand }}"
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.brand }}-windows-installer
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MSI=$(find src-tauri/target/release/bundle/msi -name "*.msi" | head -1)
+          NSIS=$(find src-tauri/target/release/bundle/nsis -name "*-setup.exe" | head -1)
+          TAG="${{ inputs.brand }}-win-v${LIT_BUILD_VERSION}"
+          echo "publishing $TAG with $MSI $NSIS"
+          gh release create "$TAG" $MSI $NSIS \
+            --repo "${{ github.repository }}" \
+            --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (Windows x64)" \
+            --notes "Unsigned tester build (Windows x64). Install via the .msi (or the NSIS -setup.exe). Windows SmartScreen will warn on an unsigned installer — click 'More info' then 'Run anyway'. Authenticode signing is coming later; until then the SmartScreen step is expected."
