@@ -11,6 +11,11 @@ on:
         type: choice
         options: [jovai, litai]
         default: jovai
+      arch:
+        description: "macOS architecture (arm64 = Apple Silicon, x64 = Intel)"
+        type: choice
+        options: [arm64, x64]
+        default: arm64
       lib_version:
         description: "positronic-lit wheel version (blank/latest -> newest published)"
         default: "latest"
@@ -20,7 +25,8 @@ on:
 
 jobs:
   build-dmg:
-    runs-on: macos-latest # Apple Silicon -> aarch64-apple-darwin
+    # arm64 -> macos-latest (Apple Silicon); x64 -> macos-13 (Intel runner).
+    runs-on: ${{ inputs.arch == 'x64' && 'macos-13' || 'macos-latest' }}
     permissions:
       contents: write # to publish the release
     env:
@@ -107,14 +113,15 @@ jobs:
           GH_TOKEN: ${{ inputs.brand == 'litai' && secrets.RELEASES_TOKEN || github.token }}
         run: |
           DMG=$(find src-tauri/target/release/bundle/dmg -name "*.dmg" | head -1)
+          ARCH="${{ inputs.arch }}"; ARCH="${ARCH:-arm64}"
           if [ "${{ inputs.brand }}" = "litai" ]; then
-            cp "$DMG" "LIT-Desktop-macOS-arm64.dmg"
+            cp "$DMG" "LIT-Desktop-macOS-${ARCH}.dmg"
             REPO="Positronic-AI/lit-desktop-releases"
             gh release view latest --repo "$REPO" >/dev/null 2>&1 || \
               gh release create latest --repo "$REPO" --title "LIT Desktop (latest)" \
                 --notes "Latest LIT Desktop installers for macOS, Windows, and Linux. Unsigned early-access builds." --latest
-            gh release upload latest "LIT-Desktop-macOS-arm64.dmg" --repo "$REPO" --clobber
-            echo "published macOS ${LIT_BUILD_VERSION} to $REPO/releases/latest"
+            gh release upload latest "LIT-Desktop-macOS-${ARCH}.dmg" --repo "$REPO" --clobber
+            echo "published macOS ${ARCH} ${LIT_BUILD_VERSION} to $REPO/releases/latest"
           else
             TAG="${{ inputs.brand }}-v${LIT_BUILD_VERSION}"
             gh release create "$TAG" "$DMG" \
