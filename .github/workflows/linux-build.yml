@@ -97,29 +97,20 @@ jobs:
             src-tauri/target/release/bundle/rpm/*.rpm
           if-no-files-found: error
 
-      # Public downloads go to the dedicated releases repo (litai only) under a
-      # rolling "latest" release with STABLE, version-less asset names, so the
-      # install page can link to permanent /releases/latest/download/<name> URLs.
-      # jovai (white-label) tester builds stay in this repo, per-version.
+      # Both brands publish to lit-desktop-releases under a rolling per-brand tag
+      # (litai -> "latest", jovai -> "jovai") with stable, brand-prefixed names.
       - name: Publish
         env:
-          GH_TOKEN: ${{ inputs.brand == 'litai' && secrets.RELEASES_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
+          REPO="Positronic-AI/lit-desktop-releases"
           DEB=$(find src-tauri/target/release/bundle/deb -name "*.deb" | head -1)
           RPM=$(find src-tauri/target/release/bundle/rpm -name "*.rpm" | head -1)
-          if [ "${{ inputs.brand }}" = "litai" ]; then
-            cp "$DEB" "LIT-Desktop-Linux-x64.deb"
-            cp "$RPM" "LIT-Desktop-Linux-x64.rpm"
-            REPO="Positronic-AI/lit-desktop-releases"
-            gh release view latest --repo "$REPO" >/dev/null 2>&1 || \
-              gh release create latest --repo "$REPO" --title "LIT Desktop (latest)" \
-                --notes "Latest LIT Desktop installers for macOS, Windows, and Linux. Unsigned early-access builds." --latest
-            gh release upload latest "LIT-Desktop-Linux-x64.deb" "LIT-Desktop-Linux-x64.rpm" --repo "$REPO" --clobber
-            echo "published Linux ${LIT_BUILD_VERSION} to $REPO/releases/latest"
-          else
-            TAG="${{ inputs.brand }}-linux-v${LIT_BUILD_VERSION}"
-            gh release create "$TAG" "$DEB" "$RPM" \
-              --repo "${{ github.repository }}" \
-              --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (Linux)" \
-              --notes "Unsigned tester build (Linux x86_64). Install the .deb or .rpm."
-          fi
+          if [ "${{ inputs.brand }}" = "litai" ]; then TAG="latest"; PREFIX="LIT-Desktop"; TITLE="LIT Desktop (latest)"; LATEST="--latest"; else TAG="jovai"; PREFIX="JovAI"; TITLE="JovAI Desktop (latest)"; LATEST=""; fi
+          cp "$DEB" "${PREFIX}-Linux-x64.deb"
+          cp "$RPM" "${PREFIX}-Linux-x64.rpm"
+          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$REPO" --title "$TITLE" \
+              --notes "Latest ${PREFIX} installers (macOS, Windows, Linux). Unsigned early-access builds." $LATEST
+          gh release upload "$TAG" "${PREFIX}-Linux-x64.deb" "${PREFIX}-Linux-x64.rpm" --repo "$REPO" --clobber
+          echo "published Linux ${LIT_BUILD_VERSION} to $REPO/releases/$TAG"

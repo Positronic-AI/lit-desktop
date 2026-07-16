@@ -102,27 +102,20 @@ jobs:
             src-tauri/target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
 
-      # litai -> public releases repo, rolling "latest" with stable asset names.
-      # jovai -> this repo, per-version (tester builds).
+      # Both brands publish to lit-desktop-releases under a rolling per-brand tag
+      # (litai -> "latest", jovai -> "jovai") with stable, brand-prefixed names.
       - name: Publish
         env:
-          GH_TOKEN: ${{ inputs.brand == 'litai' && secrets.RELEASES_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
+          REPO="Positronic-AI/lit-desktop-releases"
           MSI=$(find src-tauri/target/release/bundle/msi -name "*.msi" | head -1)
           NSIS=$(find src-tauri/target/release/bundle/nsis -name "*-setup.exe" | head -1)
-          if [ "${{ inputs.brand }}" = "litai" ]; then
-            cp "$MSI" "LIT-Desktop-Windows-x64.msi"
-            cp "$NSIS" "LIT-Desktop-Windows-x64-setup.exe"
-            REPO="Positronic-AI/lit-desktop-releases"
-            gh release view latest --repo "$REPO" >/dev/null 2>&1 || \
-              gh release create latest --repo "$REPO" --title "LIT Desktop (latest)" \
-                --notes "Latest LIT Desktop installers for macOS, Windows, and Linux. Unsigned early-access builds." --latest
-            gh release upload latest "LIT-Desktop-Windows-x64.msi" "LIT-Desktop-Windows-x64-setup.exe" --repo "$REPO" --clobber
-            echo "published Windows ${LIT_BUILD_VERSION} to $REPO/releases/latest"
-          else
-            TAG="${{ inputs.brand }}-win-v${LIT_BUILD_VERSION}"
-            gh release create "$TAG" "$MSI" "$NSIS" \
-              --repo "${{ github.repository }}" \
-              --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (Windows x64)" \
-              --notes "Unsigned tester build (Windows x64). SmartScreen will warn on an unsigned installer - click 'More info' then 'Run anyway'."
-          fi
+          if [ "${{ inputs.brand }}" = "litai" ]; then TAG="latest"; PREFIX="LIT-Desktop"; TITLE="LIT Desktop (latest)"; LATEST="--latest"; else TAG="jovai"; PREFIX="JovAI"; TITLE="JovAI Desktop (latest)"; LATEST=""; fi
+          cp "$MSI" "${PREFIX}-Windows-x64.msi"
+          cp "$NSIS" "${PREFIX}-Windows-x64-setup.exe"
+          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$REPO" --title "$TITLE" \
+              --notes "Latest ${PREFIX} installers (macOS, Windows, Linux). Unsigned early-access builds." $LATEST
+          gh release upload "$TAG" "${PREFIX}-Windows-x64.msi" "${PREFIX}-Windows-x64-setup.exe" --repo "$REPO" --clobber
+          echo "published Windows ${LIT_BUILD_VERSION} to $REPO/releases/$TAG"

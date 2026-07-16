@@ -106,27 +106,22 @@ jobs:
           path: src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
-      # litai -> public releases repo, rolling "latest" with a stable asset name.
-      # jovai -> this repo, per-version (tester builds for Nate).
+      # Both brands publish to the public lit-desktop-releases repo under a
+      # rolling per-brand tag (litai -> "latest", jovai -> "jovai") with stable,
+      # brand-prefixed asset names, so each brand's install page links to
+      # permanent /releases/<tag>/download/<name> URLs.
       - name: Publish
         env:
-          GH_TOKEN: ${{ inputs.brand == 'litai' && secrets.RELEASES_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
+          REPO="Positronic-AI/lit-desktop-releases"
           DMG=$(find src-tauri/target/release/bundle/dmg -name "*.dmg" | head -1)
           ARCH="${{ inputs.arch }}"; ARCH="${ARCH:-arm64}"
-          if [ "${{ inputs.brand }}" = "litai" ]; then
-            cp "$DMG" "LIT-Desktop-macOS-${ARCH}.dmg"
-            REPO="Positronic-AI/lit-desktop-releases"
-            gh release view latest --repo "$REPO" >/dev/null 2>&1 || \
-              gh release create latest --repo "$REPO" --title "LIT Desktop (latest)" \
-                --notes "Latest LIT Desktop installers for macOS, Windows, and Linux. Unsigned early-access builds." --latest
-            gh release upload latest "LIT-Desktop-macOS-${ARCH}.dmg" --repo "$REPO" --clobber
-            echo "published macOS ${ARCH} ${LIT_BUILD_VERSION} to $REPO/releases/latest"
-          else
-            TAG="${{ inputs.brand }}-v${LIT_BUILD_VERSION}"
-            gh release create "$TAG" "$DMG" \
-              --repo "${{ github.repository }}" \
-              --title "${{ inputs.brand }} Desktop ${LIT_BUILD_VERSION} (macOS - Apple Silicon)" \
-              --notes "Unsigned tester build (Apple Silicon). Open the .dmg, drag to Applications, then 'xattr -cr' the app once." \
-              --latest
-          fi
+          if [ "${{ inputs.brand }}" = "litai" ]; then TAG="latest"; PREFIX="LIT-Desktop"; TITLE="LIT Desktop (latest)"; LATEST="--latest"; else TAG="jovai"; PREFIX="JovAI"; TITLE="JovAI Desktop (latest)"; LATEST=""; fi
+          NAME="${PREFIX}-macOS-${ARCH}.dmg"
+          cp "$DMG" "$NAME"
+          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$REPO" --title "$TITLE" \
+              --notes "Latest ${PREFIX} installers (macOS, Windows, Linux). Unsigned early-access builds." $LATEST
+          gh release upload "$TAG" "$NAME" --repo "$REPO" --clobber
+          echo "published $NAME (${LIT_BUILD_VERSION}) to $REPO/releases/$TAG"
