@@ -97,20 +97,20 @@ jobs:
             src-tauri/target/release/bundle/rpm/*.rpm
           if-no-files-found: error
 
-      # Both brands publish to lit-desktop-releases under a rolling per-brand tag
-      # (litai -> "latest", jovai -> "jovai") with stable, brand-prefixed names.
+      # Each brand -> its own org's downloads repo, rolling "latest":
+      # litai -> Positronic-AI/lit-desktop-releases (RELEASES_TOKEN),
+      # jovai -> automateix/jovai-desktop-releases (JOVAI_RELEASES_TOKEN).
       - name: Publish
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          GH_TOKEN: ${{ inputs.brand == 'jovai' && secrets.JOVAI_RELEASES_TOKEN || secrets.RELEASES_TOKEN }}
         run: |
-          REPO="Positronic-AI/lit-desktop-releases"
           DEB=$(find src-tauri/target/release/bundle/deb -name "*.deb" | head -1)
           RPM=$(find src-tauri/target/release/bundle/rpm -name "*.rpm" | head -1)
-          if [ "${{ inputs.brand }}" = "litai" ]; then TAG="latest"; PREFIX="LIT-Desktop"; TITLE="LIT Desktop (latest)"; LATEST="--latest"; else TAG="jovai"; PREFIX="JovAI"; TITLE="JovAI Desktop (latest)"; LATEST=""; fi
+          if [ "${{ inputs.brand }}" = "litai" ]; then REPO="Positronic-AI/lit-desktop-releases"; PREFIX="LIT-Desktop"; TITLE="LIT Desktop (latest)"; else REPO="automateix/jovai-desktop-releases"; PREFIX="JovAI"; TITLE="JovAI Desktop (latest)"; fi
           cp "$DEB" "${PREFIX}-Linux-x64.deb"
           cp "$RPM" "${PREFIX}-Linux-x64.rpm"
-          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || \
-            gh release create "$TAG" --repo "$REPO" --title "$TITLE" \
-              --notes "Latest ${PREFIX} installers (macOS, Windows, Linux). Unsigned early-access builds." $LATEST
-          gh release upload "$TAG" "${PREFIX}-Linux-x64.deb" "${PREFIX}-Linux-x64.rpm" --repo "$REPO" --clobber
-          echo "published Linux ${LIT_BUILD_VERSION} to $REPO/releases/$TAG"
+          gh release view latest --repo "$REPO" >/dev/null 2>&1 || \
+            gh release create latest --repo "$REPO" --title "$TITLE" \
+              --notes "Latest ${PREFIX} installers (macOS, Windows, Linux). Unsigned early-access builds." --latest
+          gh release upload latest "${PREFIX}-Linux-x64.deb" "${PREFIX}-Linux-x64.rpm" --repo "$REPO" --clobber
+          echo "published Linux ${LIT_BUILD_VERSION} to $REPO/releases/latest"
