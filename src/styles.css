@@ -68,6 +68,100 @@ body {
   height: 100vh;
   width: 100vw;
 }
+/* The app-level toolbar docks to an edge; #content reflows around it. Top/bottom
+   are horizontal strips (column layout), left/right are vertical rails (row). */
+#app[data-toolbar-edge="top"],
+#app[data-toolbar-edge="bottom"] { flex-direction: column; }
+#app[data-toolbar-edge="left"],
+#app[data-toolbar-edge="right"] { flex-direction: row; }
+#app[data-toolbar-edge="bottom"] #app-toolbar,
+#app[data-toolbar-edge="right"] #app-toolbar { order: 2; } /* after #content */
+
+/* App-level toolbar — global controls (settings, theme; widget shortcuts later).
+   Docked to a window edge, drag the grip to move it between edges. */
+#app-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 6px;
+  background: var(--bg-secondary);
+  z-index: 10;
+  -webkit-app-region: no-drag; /* it's our drag target, not the OS window drag */
+}
+#app[data-toolbar-edge="top"] #app-toolbar { border-bottom: 1px solid var(--border); }
+#app[data-toolbar-edge="bottom"] #app-toolbar { border-top: 1px solid var(--border); }
+#app[data-toolbar-edge="left"] #app-toolbar,
+#app[data-toolbar-edge="right"] #app-toolbar {
+  flex-direction: column;
+  padding: 6px 3px;
+}
+#app[data-toolbar-edge="left"] #app-toolbar { border-right: 1px solid var(--border); }
+#app[data-toolbar-edge="right"] #app-toolbar { border-left: 1px solid var(--border); }
+
+/* Favorites lay out in the toolbar's own direction (display:contents makes the
+   pinned buttons direct flex children of #app-toolbar). */
+#toolbar-favorites { display: contents; }
+#toolbar-add { font-size: 15px; font-weight: 600; }
+/* Thin separator between the favorites rail and the fixed global controls. */
+#settings-btn-global {
+  margin-left: 4px;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  padding-left: 8px;
+}
+#app[data-toolbar-edge="left"] #settings-btn-global,
+#app[data-toolbar-edge="right"] #settings-btn-global {
+  margin-left: 0;
+  margin-top: 4px;
+  border-left: none;
+  border-top: 1px solid var(--border);
+  padding-left: 6px;
+  padding-top: 6px;
+}
+
+/* Lightweight context menu (used for toolbar position). */
+.ctx-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 150px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+  padding: 4px;
+  font-size: 13px;
+}
+.ctx-menu-label {
+  padding: 5px 10px 6px;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.ctx-menu-item {
+  padding: 6px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ctx-menu-item::before { content: ""; width: 1ch; display: inline-block; }
+.ctx-menu-item.active { color: var(--accent); }
+.ctx-menu-item.active::before { content: "\2713"; } /* check */
+.ctx-menu-item:hover { background: var(--channel-active); }
+
+/* Pin star on command-palette rows. */
+.command-item .cmd-label { flex: 1; }
+.command-item .cmd-pin {
+  opacity: 0.3;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+}
+.command-item .cmd-pin:hover { opacity: 1; }
+.command-item .cmd-pin.pinned { opacity: 1; color: var(--accent); }
 
 /* Sidebar */
 #sidebar {
@@ -275,7 +369,77 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0; /* let it shrink in a column flex so a bottom-docked toolbar stays on-screen */
 }
+
+/* --- Docking shell (dockview-core) --- */
+#dockview-container {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  /* Bind dockview's surface colors to the app theme so the dock follows
+     data-theme (on <html>) deterministically — no dependence on which
+     dockview-theme-* class the JS happened to put on <body>, nor on startup
+     ordering. Scoped to #dockview-container (a descendant of <body>) so these
+     override the body theme-class values for everything inside the dock. */
+  --dv-group-view-background-color: var(--bg-primary);
+  --dv-tabs-and-actions-container-background-color: var(--bg-secondary);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--bg-primary);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--bg-secondary);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--bg-secondary);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--bg-secondary);
+  --dv-activegroup-visiblepanel-tab-color: var(--text-primary);
+  --dv-activegroup-hiddenpanel-tab-color: var(--text-muted);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--text-secondary);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--text-muted);
+  --dv-tab-divider-color: var(--border);
+  --dv-separator-border: var(--border);
+  --dv-paneview-header-border-color: var(--border);
+}
+/* dockview declares the panel background via a CSS var (--dv-group-view-
+   background-color) that it scopes to the .dv-dockview root element itself, so
+   an ancestor override on #dockview-container can't reach it. Force the color
+   directly on the group surfaces — "#id .class" (0,1,1) outranks dockview's
+   bare ".dv-dockview"/".dv-groupview" (0,0,1) — so the dock tracks the app
+   theme (--bg-primary flips with data-theme on <html>). */
+#dockview-container .dv-dockview,
+#dockview-container .dv-groupview {
+  background-color: var(--bg-primary);
+}
+/* dockview's panel host — the chat content fills it. */
+.dv-panel-content {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* The chat panel content, once relocated into a dockview panel, IS the full
+   channel view (webapp parity): the channel nav sits on the left and the
+   header/messages/input stack on the right inside #chat-main. */
+#chat-panel-root:not([hidden]) {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+}
+#chat-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* File viewer panel */
+.viewer-body {
+  height: 100%;
+  overflow: auto;
+  padding: 16px 22px;
+  font-size: 14px;
+  line-height: 1.55;
+}
+.viewer-body pre { max-width: 100%; overflow-x: auto; }
+.viewer-error { color: var(--red, #f43f5e); }
 
 #content-header {
   padding: 12px 24px;

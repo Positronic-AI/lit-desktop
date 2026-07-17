@@ -10,35 +10,17 @@
 
   <body>
     <div id="app">
-      <nav id="sidebar">
-        <div id="channel-list">
-          <div class="section-label">Channels</div>
-        </div>
-      </nav>
-      <div id="sidebar-resize-handle"></div>
+      <!-- App-level toolbar. Favorites rail + global controls. Right-click to reposition. -->
+      <div id="app-toolbar" title="Right-click to reposition">
+        <button id="toolbar-add" class="icon-btn header-btn" title="Add a shortcut">+</button>
+        <div id="toolbar-favorites"></div>
+        <button id="settings-btn-global" class="icon-btn header-btn" title="Settings">&#9881;</button>
+        <button id="theme-toggle" class="icon-btn header-btn" title="Toggle theme">&#9790;</button>
+      </div>
       <main id="content">
-        <header id="content-header">
-          <button id="sidebar-expand-btn" class="icon-btn header-btn" title="Show sidebar" style="display:none">&#9654;</button>
-          <h2 id="channel-title">Welcome</h2>
-          <div id="channel-actions"></div>
-          <button id="terminal-toggle-btn" class="icon-btn header-btn" title="Toggle live terminal">&gt;_</button>
-          <button id="settings-btn-global" class="icon-btn header-btn" title="Settings">&#9881;</button>
-          <button id="theme-toggle" class="icon-btn header-btn" title="Toggle theme">&#9790;</button>
-        </header>
-        <div id="messages-wrapper">
-          <div id="messages">
-            <div class="message system">
-              <div class="message-content">
-                <p><strong>LIT Desktop v2.0</strong></p>
-                <p>Connect to a LIT server to get started.</p>
-                <p class="hint">Use <kbd>Ctrl+K</kbd> to open the command palette.</p>
-              </div>
-            </div>
-          </div>
-          <button id="scroll-to-bottom" title="Scroll to bottom">
-            <span class="scroll-arrow">&#8595;</span>
-          </button>
-        </div>
+        <div id="dockview-container"></div>
+        <!-- Live terminal — a full-area overlay over the dock for now; becomes a
+             dockable panel in a later step. -->
         <div id="terminal-panel" style="display:none">
           <div id="terminal-panel-header">
             <span id="terminal-panel-title">Live terminal</span>
@@ -47,14 +29,47 @@
           </div>
           <div id="terminal-host"></div>
         </div>
-        <div id="input-resize-handle"></div>
-        <div id="input-area">
-          <div id="agent-tabs"></div>
-          <div id="agent-info"></div>
-          <div id="input-row">
-            <textarea id="message-input" placeholder="Type a message..." rows="1"></textarea>
-            <button id="cancel-stream-btn" title="Stop generating" style="display:none">&#9632;</button>
-            <button id="send-btn" title="Send (Enter)">&#8593;</button>
+        <!-- Chat panel content. Relocated into a dockview panel at startup; kept
+             intact here so all existing element refs/handlers (messagesEl,
+             inputArea, agent-tabs, ...) resolve unchanged. -->
+        <div id="chat-panel-root" hidden>
+          <nav id="sidebar">
+            <div id="channel-list">
+              <div class="section-label">Channels</div>
+            </div>
+          </nav>
+          <div id="sidebar-resize-handle"></div>
+          <div id="chat-main">
+            <header id="content-header">
+              <button id="sidebar-expand-btn" class="icon-btn header-btn" title="Show sidebar" style="display:none">&#9654;</button>
+              <h2 id="channel-title">Welcome</h2>
+              <div id="channel-actions"></div>
+              <button id="terminal-toggle-btn" class="icon-btn header-btn" title="Toggle live terminal">&gt;_</button>
+            </header>
+            <div id="messages-wrapper">
+            <div id="messages">
+              <div class="message system">
+                <div class="message-content">
+                  <p><strong>LIT Desktop v2.0</strong></p>
+                  <p>Connect to a LIT server to get started.</p>
+                  <p class="hint">Use <kbd>Ctrl+K</kbd> to open the command palette.</p>
+                </div>
+              </div>
+            </div>
+            <button id="scroll-to-bottom" title="Scroll to bottom">
+              <span class="scroll-arrow">&#8595;</span>
+            </button>
+          </div>
+          <div id="input-resize-handle"></div>
+          <div id="input-area">
+            <div id="agent-tabs"></div>
+            <div id="agent-info"></div>
+            <div id="input-row">
+              <textarea id="message-input" placeholder="Type a message..." rows="1"></textarea>
+              <button id="cancel-stream-btn" title="Stop generating" style="display:none">&#9632;</button>
+              <button id="send-btn" title="Send (Enter)">&#8593;</button>
+            </div>
+          </div>
           </div>
         </div>
       </main>

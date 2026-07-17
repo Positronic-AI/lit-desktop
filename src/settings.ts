@@ -95,6 +95,14 @@ export function openSettings(
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) closeSettings();
     });
+    // Escape closes the dialog — familiar keyboard pattern (registered once).
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && overlay?.classList.contains("active")) {
+        e.preventDefault();
+        e.stopPropagation();
+        closeSettings();
+      }
+    });
     document.body.appendChild(overlay);
   }
   overlay.innerHTML = "";

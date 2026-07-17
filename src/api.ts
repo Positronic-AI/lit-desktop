@@ -91,6 +91,20 @@ export async function checkConnection(): Promise<boolean> {
   }
 }
 
+/** Read a file's text from the backend (the mux commander file API). */
+export async function readServerFile(path: string): Promise<string> {
+  const r = await apiFetch<{ success: boolean; data?: string; error?: string }>(
+    "/commander/read_file",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    },
+  );
+  if (!r.success) throw new Error(r.error || "Failed to read file");
+  return r.data ?? "";
+}
+
 export async function fetchAgents(): Promise<Agent[]> {
   const data = await apiFetch<{ agents: Agent[] }>("/agents");
   return data.agents;

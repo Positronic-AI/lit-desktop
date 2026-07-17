@@ -21,6 +21,7 @@ import {
   cancelStream,
   uploadImage,
   getServer,
+  readServerFile,
   type Agent,
   type Channel,
   type BackendModel,
@@ -34,6 +35,188 @@ import { renderMarkdown } from "./markdown";
 import { openSettings } from "./settings";
 import { openTerminal, closeTerminal, isTerminalOpen, fitToGrid } from "./terminal";
 import { brand } from "./brand";
+import { WindowManager } from "./window-manager";
+import { registerPanel } from "./panel-host";
+import "dockview-core/dist/styles/dockview.css";
+
+// --- Docking shell (Step 1: chat becomes a dockview panel) ---
+const wm = new WindowManager();
+const DOCK_LAYOUT_KEY = "lit-desktop-dock-layout";
+
+// The chat panel relocates the existing #chat-panel-root DOM into the panel host.
+// Moving (not recreating) the nodes preserves every element ref/handler in this
+// file — messagesEl, inputArea, agent-tabs, etc. all keep resolving.
+registerPanel("chat", () => ({
+  mount(host: HTMLElement) {
+    const root = document.getElementById("chat-panel-root");
+    if (root) {
+      root.hidden = false;
+      host.appendChild(root);
+    }
+  },
+  // Persistent panel — never disposed.
+}));
+
+// The viewer panel renders a file's text beside the chat — markdown rendered,
+// other files syntax-highlighted in a code block. The first "see my work next to
+// the conversation" surface; a Monaco editor/diff comes later.
+registerPanel("viewer", () => ({
+  mount(host: HTMLElement, params: Record<string, any>) {
+    const path = String(params.path || "");
+    const body = document.createElement("div");
+    body.className = "viewer-body";
+    body.textContent = `Loading ${path}…`;
+    host.appendChild(body);
+    readServerFile(path)
+      .then((content) => {
+        const isMd = /\.(md|markdown)$/i.test(path);
+        const ext = (path.split(".").pop() || "").toLowerCase();
+        const md = isMd ? content : "```" + ext + "\n" + content + "\n```";
+        body.innerHTML = renderMarkdown(md);
+      })
+      .catch((e) => {
+        body.classList.add("viewer-error");
+        body.textContent = `Couldn't open ${path}: ${e?.message || e}`;
+      });
+  },
+}));
+
+function currentThemeMode(): "light" | "dark" {
+  return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+}
+
+function setupDock(): void {
+  const container = document.getElementById("dockview-container");
+  if (!container) return;
+  wm.setLayoutStorageKey(DOCK_LAYOUT_KEY);
+  wm.init(container);
+  wm.setTheme(currentThemeMode());
+  // Restore a saved layout; otherwise open the chat panel fresh. Always guarantee
+  // the chat panel exists (it's the shell's anchor).
+  const restored = wm.restore();
+  if (!restored || !wm.hasPanel("chat")) {
+    wm.addPanel({ id: "chat", component: "chat", title: "Chat", persistent: true });
+  }
+}
+
+// The app-level toolbar. A favorites rail (commands pinned from the F1 palette)
+// plus the fixed global controls (settings, theme). It docks to a window edge and
+// #content reflows around it — position is set via right-click, not drag, since
+// it's a set-once preference. Same edge model as the webapp menubar.
+const TOOLBAR_EDGE_KEY = "lit-desktop-toolbar-edge";
+const TOOLBAR_FAV_KEY = "lit-desktop-toolbar-favorites";
+type ToolbarEdge = "top" | "bottom" | "left" | "right";
+const TOOLBAR_EDGES: ToolbarEdge[] = ["top", "bottom", "left", "right"];
+
+function toolbarFavorites(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(TOOLBAR_FAV_KEY) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+function isFavorite(id: string): boolean { return toolbarFavorites().includes(id); }
+function toggleFavorite(id: string): void {
+  const favs = toolbarFavorites();
+  const i = favs.indexOf(id);
+  if (i >= 0) favs.splice(i, 1); else favs.push(id);
+  localStorage.setItem(TOOLBAR_FAV_KEY, JSON.stringify(favs));
+  renderToolbarFavorites();
+}
+/** Render pinned commands as buttons in the toolbar. Stale ids (a channel/agent
+ *  that no longer exists) silently drop since the command won't resolve. */
+function renderToolbarFavorites(): void {
+  const host = document.getElementById("toolbar-favorites");
+  if (!host) return;
+  host.innerHTML = "";
+  const byId = new Map(getCommands().map((c) => [c.id, c]));
+  for (const id of toolbarFavorites()) {
+    const cmd = byId.get(id);
+    if (!cmd) continue;
+    const btn = document.createElement("button");
+    btn.className = "icon-btn header-btn toolbar-fav";
+    btn.title = cmd.label;
+    btn.textContent = cmd.icon;
+    btn.addEventListener("click", () => cmd.action());
+    // Right-click a favorite to unpin it directly.
+    btn.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleFavorite(id);
+    });
+    host.appendChild(btn);
+  }
+}
+
+function setToolbarEdge(edge: ToolbarEdge): void {
+  document.getElementById("app")?.setAttribute("data-toolbar-edge", edge);
+  localStorage.setItem(TOOLBAR_EDGE_KEY, edge);
+}
+
+/** Right-click menu on the toolbar: pick which edge it docks to. */
+function showToolbarPositionMenu(x: number, y: number): void {
+  document.getElementById("toolbar-ctx-menu")?.remove();
+  const menu = document.createElement("div");
+  menu.id = "toolbar-ctx-menu";
+  menu.className = "ctx-menu";
+  const label = document.createElement("div");
+  label.className = "ctx-menu-label";
+  label.textContent = "Toolbar position";
+  menu.appendChild(label);
+  const current = document.getElementById("app")?.getAttribute("data-toolbar-edge");
+  for (const edge of TOOLBAR_EDGES) {
+    const item = document.createElement("div");
+    item.className = "ctx-menu-item" + (edge === current ? " active" : "");
+    item.textContent = edge.charAt(0).toUpperCase() + edge.slice(1);
+    item.addEventListener("click", () => { setToolbarEdge(edge); menu.remove(); });
+    menu.appendChild(item);
+  }
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4)) + "px";
+  menu.style.top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4)) + "px";
+  const dismiss = (ev: MouseEvent) => {
+    if (!menu.contains(ev.target as Node)) {
+      menu.remove();
+      document.removeEventListener("mousedown", dismiss);
+    }
+  };
+  setTimeout(() => document.addEventListener("mousedown", dismiss), 0);
+}
+
+function setupAppToolbar(): void {
+  const app = document.getElementById("app");
+  const bar = document.getElementById("app-toolbar");
+  if (!app || !bar) return;
+
+  const saved = localStorage.getItem(TOOLBAR_EDGE_KEY) as ToolbarEdge | null;
+  app.setAttribute("data-toolbar-edge", saved && TOOLBAR_EDGES.includes(saved) ? saved : "top");
+
+  const addBtn = document.getElementById("toolbar-add");
+  if (addBtn) addBtn.addEventListener("click", () => openCommandPalette());
+
+  bar.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showToolbarPositionMenu(e.clientX, e.clientY);
+  });
+
+  renderToolbarFavorites();
+}
+
+/** Open a file in a viewer panel beside the chat (focus it if already open). */
+function openViewer(path: string): void {
+  const id = `viewer:${path}`;
+  if (wm.hasPanel(id)) {
+    wm.focusPanel(id);
+    return;
+  }
+  const title = path.split("/").pop() || path;
+  wm.addPanel({ id, component: "viewer", title, params: { path } });
+}
+
+async function handleOpenFile(): Promise<void> {
+  const sel = await open({ multiple: false, title: "Open a file" });
+  if (typeof sel === "string") openViewer(sel);
+}
 
 let backendProcess: Child | null = null;
 // Set by startBackend() when the backend fails to start, so the failure dialog
@@ -976,22 +1159,20 @@ function setTerminalOpen(open: boolean) {
   const panel = document.getElementById("terminal-panel");
   const host = document.getElementById("terminal-host");
   const btn = document.getElementById("terminal-toggle-btn");
-  // The chat region the terminal replaces when it takes over the whole area.
-  const chatRegion = [
-    document.getElementById("messages-wrapper"),
-    document.getElementById("input-resize-handle"),
-    document.getElementById("input-area"),
-  ];
+  // The chat now lives in a dockview panel, so the terminal takes over by hiding
+  // the whole dock (instead of the individual chat elements). A later step makes
+  // the terminal a dockable panel of its own, so it can sit beside chat.
+  const dock = document.getElementById("dockview-container");
   if (!panel || !host) return;
   if (open && currentChannel) {
-    for (const e of chatRegion) if (e) e.style.display = "none";
+    if (dock) dock.style.display = "none";
     panel.style.display = "flex";
     btn?.classList.add("active");
     openTerminal(host, currentChannel.id);
     setTimeout(fitToGrid, 60);
   } else {
     panel.style.display = "none";
-    for (const e of chatRegion) if (e) e.style.display = "";
+    if (dock) dock.style.display = "";
     btn?.classList.remove("active");
     closeTerminal();
   }
@@ -1996,6 +2177,7 @@ function initTheme() {
       document.documentElement.setAttribute("data-theme", next);
       localStorage.setItem("lit-theme", next);
       btn.textContent = next === "dark" ? "☾" : "☀";
+      wm.setTheme(next);
     });
   }
 }
@@ -2005,6 +2187,8 @@ async function init() {
   initTheme();
   setStatus("connecting");
   initSidebar();
+  setupDock();
+  setupAppToolbar();
 
   const scrollBtn = document.getElementById("scroll-to-bottom");
   if (scrollBtn) scrollBtn.addEventListener("click", scrollToBottom);
@@ -2140,6 +2324,7 @@ interface Command {
 function getCommands(): Command[] {
   const cmds: Command[] = [
     { id: "open-folder", label: "Open Folder", icon: "📂", action: handleOpenFolder },
+    { id: "open-file", label: "Open File…", icon: "📄", shortcut: "Ctrl+O", action: handleOpenFile },
     { id: "toggle-sidebar", label: "Toggle Sidebar", icon: "◧", shortcut: "Ctrl+\\", action: () => sidebarOpen ? collapseSidebar() : expandSidebar() },
     { id: "toggle-theme", label: "Toggle Theme", icon: "☾", action: () => document.getElementById("theme-toggle")?.click() },
     { id: "scroll-bottom", label: "Scroll to Bottom", icon: "↓", action: scrollToBottom },
@@ -2180,8 +2365,22 @@ function renderCommandList(cmds: Command[], list: HTMLElement) {
   cmds.forEach((cmd, i) => {
     const item = document.createElement("div");
     item.className = "command-item" + (i === commandPaletteSelectedIndex ? " selected" : "");
-    item.innerHTML = `<span class="cmd-icon">${cmd.icon}</span><span>${escapeHtml(cmd.label)}</span>${cmd.shortcut ? `<span class="cmd-shortcut">${cmd.shortcut}</span>` : ""}`;
-    item.addEventListener("click", () => { closeCommandPalette(); cmd.action(); });
+    const pinned = isFavorite(cmd.id);
+    item.innerHTML = `<span class="cmd-icon">${cmd.icon}</span><span class="cmd-label">${escapeHtml(cmd.label)}</span>${cmd.shortcut ? `<span class="cmd-shortcut">${cmd.shortcut}</span>` : ""}<span class="cmd-pin${pinned ? " pinned" : ""}" title="${pinned ? "Unpin from toolbar" : "Pin to toolbar"}">${pinned ? "★" : "☆"}</span>`;
+    item.addEventListener("click", (e) => {
+      const t = e.target as HTMLElement;
+      if (t.classList.contains("cmd-pin")) {
+        // Toggle pin without running the command or closing the palette.
+        e.stopPropagation();
+        toggleFavorite(cmd.id);
+        const nowPinned = t.classList.toggle("pinned");
+        t.textContent = nowPinned ? "★" : "☆";
+        t.title = nowPinned ? "Unpin from toolbar" : "Pin to toolbar";
+        return;
+      }
+      closeCommandPalette();
+      cmd.action();
+    });
     item.addEventListener("mouseenter", () => {
       commandPaletteSelectedIndex = i;
       list.querySelectorAll(".command-item").forEach((el, j) => el.classList.toggle("selected", j === i));
@@ -2288,9 +2487,21 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     openCommandPalette();
   }
+  // VS Code muscle memory: Ctrl/Cmd+Shift+P and F1 also open the command palette.
+  if (
+    ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "p") ||
+    e.key === "F1"
+  ) {
+    e.preventDefault();
+    openCommandPalette();
+  }
   if ((e.ctrlKey || e.metaKey) && e.key === "\\") {
     e.preventDefault();
     sidebarOpen ? collapseSidebar() : expandSidebar();
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
+    e.preventDefault();
+    handleOpenFile();
   }
 });
 

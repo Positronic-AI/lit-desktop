@@ -28,3 +28,8 @@ src-tauri/binaries/*server*
 
 # Channel data
 .lit/
+
+# PyInstaller build artifacts
+backend/__pycache__/
+backend/build/
+backend/dist/

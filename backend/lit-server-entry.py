@@ -42,7 +42,13 @@ _BASE = os.environ.get(
     "LIT_DESKTOP_HOME",
     os.path.join(os.path.expanduser("~"), ".local", "share", "lit-desktop"),
 )
-os.environ.setdefault("LIT_LOCAL_MODE", "true")
+# FORCE (not setdefault): a multi-user server box sets LIT_LOCAL_MODE=false in
+# /etc/environment, which every process inherits — so setdefault silently no-ops
+# and the desktop backend comes up in MULTI-USER mode. There the channel
+# WebSocket (/mux/ws/channel/{id}) demands an auth token the desktop never sends
+# and rejects every connection with HTTP 403 → the UI shows "Reconnecting…"
+# forever. The desktop is always single-user/local, so force it.
+os.environ["LIT_LOCAL_MODE"] = "true"
 os.environ.setdefault("LIT_DATA_DIR", os.path.join(_BASE, "data"))
 os.environ.setdefault("LIT_CONFIG_DIR", os.path.join(_BASE, "config"))
 # Event-signal dir defaults to the server path (/var/lib/lit/events), which a
