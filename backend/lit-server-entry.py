@@ -49,7 +49,14 @@ os.environ.setdefault("LIT_CONFIG_DIR", os.path.join(_BASE, "config"))
 # desktop user can't write. Keep it inside the sandbox.
 os.environ.setdefault("LIT_EVENTS_PATH", os.path.join(_BASE, "events"))
 _run = os.path.join(_BASE, "run")
-os.environ.setdefault("XDG_RUNTIME_DIR", _run)
+# FORCE (not setdefault): the login session ALWAYS sets XDG_RUNTIME_DIR to the
+# shared /run/user/<uid>, so setdefault was a silent no-op. That put the native
+# bridge's socket (lit-bridge-rs-<user>.sock, derived from XDG_RUNTIME_DIR) in the
+# shared runtime dir, where it collided with any OTHER lit instance running as the
+# same OS user — e.g. a dev backend — hijacking bridge sessions and breaking the
+# terminal. Forcing an app-private runtime dir gives this app its OWN bridge
+# socket, guaranteed unique, so opening the desktop app can never contend.
+os.environ["XDG_RUNTIME_DIR"] = _run
 for _d in (os.environ["LIT_DATA_DIR"], os.environ["LIT_CONFIG_DIR"],
            os.environ["LIT_EVENTS_PATH"], _run):
     try:
@@ -59,6 +66,25 @@ for _d in (os.environ["LIT_DATA_DIR"], os.environ["LIT_CONFIG_DIR"],
 try:
     os.chmod(_run, 0o700)
 except OSError:
+    pass
+
+# Reap any native bridge daemon left over from a previous session of THIS app.
+# The bridge is intentionally detached (it survives backend restarts), so a hard
+# app-close — Tauri SIGKILLs the sidecar, which never propagates to the detached
+# grandchild — can leave it running. Harmless now that the socket is app-private,
+# but reaping it on startup keeps `ps` clean and guarantees a fresh session.
+# STRICTLY scoped to our own runtime dir (_run): the match requires the app-private
+# path in the process's cmdline, so it can never touch a dev/other-app bridge.
+try:
+    import psutil  # bundled in the frozen backend
+    for _proc in psutil.process_iter(["cmdline"]):
+        try:
+            _cl = " ".join(_proc.info.get("cmdline") or [])
+            if "lit-bridge" in _cl and _run in _cl:
+                _proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+except Exception:
     pass
 
 # Tee stdout/stderr to a log file on disk. The desktop app spawns this backend
