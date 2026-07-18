@@ -441,6 +441,151 @@ body {
 .viewer-body pre { max-width: 100%; overflow-x: auto; }
 .viewer-error { color: var(--red, #f43f5e); }
 
+/* Channel search panel */
+.search-panel { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+
+/* Tabs (Text / Calendar / Knowledge Graph) */
+.search-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.search-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 8px 4px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+.search-tab:hover { color: var(--text-secondary); }
+.search-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.search-tab-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.search-tab-body[hidden] { display: none; }
+.search-placeholder { padding: 20px 16px; font-size: 13px; color: var(--text-muted); line-height: 1.5; }
+
+/* Calendar */
+.cal-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 6px; }
+.cal-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.cal-nav {
+  background: none; border: none; color: var(--text-secondary);
+  font-size: 18px; line-height: 1; cursor: pointer; padding: 0 8px; border-radius: 4px;
+}
+.cal-nav:hover { background: var(--channel-active); color: var(--text-primary); }
+.cal-dow, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; padding: 0 10px; }
+.cal-dow { margin-bottom: 2px; }
+.cal-dow span { text-align: center; font-size: 10px; color: var(--text-muted); }
+.cal-cell {
+  aspect-ratio: 1;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: default;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cal-cell.active { color: var(--text-primary); cursor: pointer; }
+.cal-cell.active:hover { outline: 1px solid var(--accent); }
+.cal-cell.empty { visibility: hidden; }
+.cal-day { flex: 1; overflow-y: auto; min-height: 0; margin-top: 8px; border-top: 1px solid var(--border); }
+.cal-day-title { padding: 8px 12px; font-size: 11px; color: var(--text-muted); position: sticky; top: 0; background: var(--bg-primary); }
+.cal-msg {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 5px 12px; cursor: pointer; font-size: 12px;
+}
+.cal-msg:hover { background: var(--channel-active); }
+.cal-msg-time { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.cal-msg-who { color: var(--text-secondary); }
+.search-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.search-input:focus { outline: none; border-color: var(--accent); }
+.search-regex {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  font-family: monospace;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.search-status {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.search-results { flex: 1; overflow-y: auto; min-height: 0; padding-bottom: 8px; }
+.search-result {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.search-result:hover { background: var(--channel-active); }
+.search-result-date { font-size: 10px; color: var(--text-muted); margin-bottom: 2px; }
+.search-result-excerpt {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.search-result-excerpt mark { background: rgba(229, 192, 123, 0.35); color: inherit; border-radius: 2px; }
+
+/* Banner atop the message list when viewing history (a jumped-to search hit). */
+.history-banner {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 6px 12px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.history-latest-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.history-latest-btn:hover { background: var(--accent-hover); }
+
+/* Flash a message when a search result jumps to it. */
+.message-flash { animation: message-flash 1.6s ease-out; }
+@keyframes message-flash {
+  0%, 25% { background: var(--channel-active); }
+  100% { background: transparent; }
+}
+
 #content-header {
   padding: 12px 24px;
   border-bottom: 1px solid var(--border);

@@ -3,6 +3,9 @@ import {
   fetchAgents,
   fetchChannels,
   fetchChannelMessages,
+  fetchMessagesAround,
+  fetchCalendarDates,
+  fetchCalendarDay,
   postChannelMessage,
   createChannelWebSocket,
   markChannelRead,
@@ -22,6 +25,7 @@ import {
   uploadImage,
   getServer,
   readServerFile,
+  searchChannelMessages,
   type Agent,
   type Channel,
   type BackendModel,
@@ -80,6 +84,239 @@ registerPanel("viewer", () => ({
       });
   },
 }));
+
+// Channel text search — a dock panel with a debounced search box + results.
+// Backed by GET /channels/{id}/messages/search. Clicking a hit that's currently
+// loaded scrolls to it and flashes it; older hits still show their excerpt.
+registerPanel("search", () => {
+  let textDebounce: ReturnType<typeof setTimeout> | undefined;
+  return {
+    mount(host: HTMLElement) {
+      host.innerHTML = `
+        <div class="search-panel">
+          <div class="search-tabs">
+            <button class="search-tab active" data-tab="text" type="button">Text</button>
+            <button class="search-tab" data-tab="calendar" type="button">Calendar</button>
+            <button class="search-tab" data-tab="graph" type="button">Knowledge Graph</button>
+          </div>
+          <div class="search-tab-body" data-body="text"></div>
+          <div class="search-tab-body" data-body="calendar" hidden></div>
+          <div class="search-tab-body" data-body="graph" hidden></div>
+        </div>`;
+      const tabs = Array.from(host.querySelectorAll(".search-tab")) as HTMLElement[];
+      const bodies = Array.from(host.querySelectorAll(".search-tab-body")) as HTMLElement[];
+      const bodyFor = (n: string) => bodies.find((b) => b.dataset.body === n)!;
+      let calendarLoaded = false;
+
+      const select = (name: string) => {
+        tabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+        bodies.forEach((b) => (b.hidden = b.dataset.body !== name));
+        if (name === "calendar" && !calendarLoaded) { calendarLoaded = true; mountCalendarView(bodyFor("calendar")); }
+        if (name === "text") (host.querySelector(".search-input") as HTMLInputElement | null)?.focus();
+      };
+      tabs.forEach((t) => t.addEventListener("click", () => select(t.dataset.tab!)));
+
+      // --- Text tab ---
+      bodyFor("text").innerHTML = `
+        <div class="search-panel-head">
+          <input type="text" class="search-input" placeholder="Search this channel…" spellcheck="false" />
+          <label class="search-regex" title="Regular expression"><input type="checkbox" class="search-regex-cb" /> .*</label>
+        </div>
+        <div class="search-status"></div>
+        <div class="search-results"></div>`;
+      const input = bodyFor("text").querySelector(".search-input") as HTMLInputElement;
+      const regexCb = bodyFor("text").querySelector(".search-regex-cb") as HTMLInputElement;
+      const status = bodyFor("text").querySelector(".search-status") as HTMLElement;
+      const list = bodyFor("text").querySelector(".search-results") as HTMLElement;
+
+      const run = async () => {
+        const q = input.value.trim();
+        list.innerHTML = "";
+        if (!q) { status.textContent = ""; return; }
+        if (!currentChannel) { status.textContent = "Open a channel to search."; return; }
+        status.textContent = "Searching…";
+        try {
+          const results = await searchChannelMessages(currentChannel.id, q, regexCb.checked);
+          status.textContent = results.length
+            ? `${results.length} result${results.length === 1 ? "" : "s"}`
+            : "No matches";
+          for (const r of results) {
+            const date = r.ref.split("/")[1] || "";
+            const row = document.createElement("div");
+            row.className = "search-result";
+            row.innerHTML =
+              `<div class="search-result-date">${escapeHtml(date)}</div>` +
+              `<div class="search-result-excerpt">${highlightMatch(escapeHtml(r.excerpt), q, regexCb.checked)}</div>`;
+            row.addEventListener("click", () => jumpToMessage(r.message_id));
+            list.appendChild(row);
+          }
+        } catch {
+          status.textContent = "Search failed.";
+        }
+      };
+      input.addEventListener("input", () => { clearTimeout(textDebounce); textDebounce = setTimeout(run, 400); });
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") { clearTimeout(textDebounce); run(); } });
+      regexCb.addEventListener("change", run);
+      setTimeout(() => input.focus(), 30);
+
+      // --- Knowledge Graph tab (its own build next) ---
+      bodyFor("graph").innerHTML =
+        `<div class="search-placeholder">The knowledge-graph view lands in its own build — the backend's already wired.</div>`;
+    },
+    dispose() { clearTimeout(textDebounce); },
+  };
+});
+
+/** Calendar view: a month heatmap of activity; click a day to list its messages,
+ *  click a message to jump to it (reuses the seekable-timeline jump). */
+function mountCalendarView(host: HTMLElement): void {
+  if (!currentChannel) { host.innerHTML = `<div class="search-placeholder">Open a channel first.</div>`; return; }
+  const channelId = currentChannel.id;
+  host.innerHTML = `
+    <div class="cal-head">
+      <button class="cal-nav cal-prev" type="button">&#8249;</button>
+      <span class="cal-title"></span>
+      <button class="cal-nav cal-next" type="button">&#8250;</button>
+    </div>
+    <div class="cal-dow"></div>
+    <div class="cal-grid"><div class="search-status">Loading…</div></div>
+    <div class="cal-day"></div>`;
+  const titleEl = host.querySelector(".cal-title") as HTMLElement;
+  const dowEl = host.querySelector(".cal-dow") as HTMLElement;
+  const gridEl = host.querySelector(".cal-grid") as HTMLElement;
+  const dayEl = host.querySelector(".cal-day") as HTMLElement;
+  dowEl.innerHTML = ["S", "M", "T", "W", "T", "F", "S"].map((d) => `<span>${d}</span>`).join("");
+
+  let dates: Record<string, number> = {};
+  let view = new Date();
+  const iso = (y: number, m: number, d: number) =>
+    `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+  const loadDay = async (date: string) => {
+    dayEl.innerHTML = `<div class="cal-day-title">${date}</div><div class="search-status">Loading…</div>`;
+    try {
+      const msgs = await fetchCalendarDay(channelId, date);
+      const rows = msgs.map((mm) => {
+        const n = Number(mm.timestamp);
+        const t = isFinite(n) ? new Date(n * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "";
+        const who = mm.direction === "in" ? "You" : (mm.from || "agent");
+        return `<div class="cal-msg" data-id="${escapeHtml(mm.id)}"><span class="cal-msg-time">${escapeHtml(t)}</span><span class="cal-msg-who">${escapeHtml(who)}</span></div>`;
+      }).join("");
+      dayEl.innerHTML = `<div class="cal-day-title">${date} · ${msgs.length} message${msgs.length === 1 ? "" : "s"}</div><div class="cal-msg-list">${rows}</div>`;
+      dayEl.querySelectorAll(".cal-msg").forEach((r) =>
+        r.addEventListener("click", () => jumpToMessage((r as HTMLElement).dataset.id)));
+    } catch {
+      dayEl.innerHTML = `<div class="search-status">Failed to load day.</div>`;
+    }
+  };
+
+  const renderGrid = () => {
+    const y = view.getFullYear(), m = view.getMonth();
+    titleEl.textContent = view.toLocaleString(undefined, { month: "long", year: "numeric" });
+    const firstDow = new Date(y, m, 1).getDay();
+    const days = new Date(y, m + 1, 0).getDate();
+    const max = Math.max(1, ...Object.values(dates));
+    let html = "";
+    for (let i = 0; i < firstDow; i++) html += `<span class="cal-cell empty"></span>`;
+    for (let d = 1; d <= days; d++) {
+      const key = iso(y, m, d);
+      const c = dates[key] || 0;
+      const intensity = c ? (0.15 + 0.5 * Math.min(1, c / max)).toFixed(2) : "0";
+      const style = c ? ` style="background:rgba(97,175,239,${intensity})" title="${c} messages"` : "";
+      html += `<button class="cal-cell${c ? " active" : ""}" data-date="${key}"${style} type="button" ${c ? "" : "disabled"}>${d}</button>`;
+    }
+    gridEl.innerHTML = html;
+    gridEl.querySelectorAll(".cal-cell.active").forEach((cell) =>
+      cell.addEventListener("click", () => loadDay((cell as HTMLElement).dataset.date!)));
+  };
+
+  host.querySelector(".cal-prev")!.addEventListener("click", () => { view = new Date(view.getFullYear(), view.getMonth() - 1, 1); renderGrid(); });
+  host.querySelector(".cal-next")!.addEventListener("click", () => { view = new Date(view.getFullYear(), view.getMonth() + 1, 1); renderGrid(); });
+
+  fetchCalendarDates(channelId).then((d) => {
+    dates = d;
+    const keys = Object.keys(dates).sort();
+    if (keys.length) {
+      const [yy, mm] = keys[keys.length - 1].split("-").map(Number);
+      view = new Date(yy, mm - 1, 1);
+    }
+    renderGrid();
+  }).catch(() => { gridEl.innerHTML = `<div class="search-status">Failed to load calendar.</div>`; });
+}
+
+/** Open (or focus) the channel search panel and focus its input. */
+function openSearch(): void {
+  if (!wm.hasPanel("search")) {
+    wm.addPanel({ id: "search", component: "search", title: "Search" });
+  }
+  wm.focusPanel("search");
+  setTimeout(() => (document.querySelector(".search-input") as HTMLInputElement | null)?.focus(), 40);
+}
+
+/** Jump to a message. If it's already loaded, scroll + flash. If it's back in
+ *  history, load a window centered on it (seekable timeline), re-render, then
+ *  snap to it — same model as the webapp. */
+async function jumpToMessage(id?: string): Promise<void> {
+  if (!id || !currentChannel) return;
+  const sel = `#messages [data-message-id="${CSS.escape(id)}"]`;
+  let el = document.querySelector(sel) as HTMLElement | null;
+
+  if (!el) {
+    try {
+      const { messages, hasNewer } = await fetchMessagesAround(currentChannel.id, id, 50);
+      if (messages.length) {
+        clearMessages();
+        if (hasNewer) renderHistoryBanner(currentChannel);
+        for (const msg of messages) {
+          knownMessageIds.add(msg.id);
+          renderMessage({
+            role: msg.direction === "in" ? "user" : "assistant",
+            content: msg.content,
+            id: msg.id,
+            from: msg.from,
+            timestamp: msg.timestamp,
+            file_path: msg.file_path,
+            metadata: msg.metadata,
+          });
+        }
+        el = document.querySelector(sel);
+      }
+    } catch {
+      /* leave the current view as-is on failure */
+    }
+  }
+
+  if (el) {
+    const target = el;
+    // instant, not smooth — the list was fully replaced, so animating is disorienting
+    target.scrollIntoView({ behavior: "auto", block: "center" });
+    target.classList.add("message-flash");
+    setTimeout(() => target.classList.remove("message-flash"), 1600);
+  }
+}
+
+/** Banner shown atop the message list when it's showing history (not the live
+ *  tail). Clicking returns to the latest messages. */
+function renderHistoryBanner(channel: Channel): void {
+  const banner = document.createElement("div");
+  banner.className = "history-banner";
+  banner.innerHTML =
+    `<span>Viewing history</span>` +
+    `<button class="history-latest-btn" type="button">Jump to latest &#8595;</button>`;
+  banner.querySelector(".history-latest-btn")!.addEventListener("click", () => openChannel(channel));
+  messagesEl.appendChild(banner);
+}
+
+/** Wrap literal matches of the query in <mark> (skipped in regex mode). */
+function highlightMatch(escapedText: string, q: string, isRegex: boolean): string {
+  if (!q || isRegex) return escapedText;
+  const escQ = escapeHtml(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  try {
+    return escapedText.replace(new RegExp(escQ, "ig"), (m) => `<mark>${m}</mark>`);
+  } catch {
+    return escapedText;
+  }
+}
 
 function currentThemeMode(): "light" | "dark" {
   return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
@@ -2196,6 +2433,9 @@ async function init() {
   const settingsBtn = document.getElementById("settings-btn-global");
   if (settingsBtn) settingsBtn.addEventListener("click", () => openSettings(() => loadInitialData()));
 
+  const searchBtn = document.getElementById("search-toggle-btn");
+  if (searchBtn) searchBtn.addEventListener("click", openSearch);
+
   const terminalBtn = document.getElementById("terminal-toggle-btn");
   if (terminalBtn) terminalBtn.addEventListener("click", toggleTerminalPanel);
   const terminalClose = document.getElementById("terminal-drawer-close");
@@ -2325,6 +2565,7 @@ function getCommands(): Command[] {
   const cmds: Command[] = [
     { id: "open-folder", label: "Open Folder", icon: "📂", action: handleOpenFolder },
     { id: "open-file", label: "Open File…", icon: "📄", shortcut: "Ctrl+O", action: handleOpenFile },
+    { id: "search-channel", label: "Search in Channel…", icon: "🔍", shortcut: "Ctrl+F", action: openSearch },
     { id: "toggle-sidebar", label: "Toggle Sidebar", icon: "◧", shortcut: "Ctrl+\\", action: () => sidebarOpen ? collapseSidebar() : expandSidebar() },
     { id: "toggle-theme", label: "Toggle Theme", icon: "☾", action: () => document.getElementById("theme-toggle")?.click() },
     { id: "scroll-bottom", label: "Scroll to Bottom", icon: "↓", action: scrollToBottom },
@@ -2502,6 +2743,10 @@ document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
     e.preventDefault();
     handleOpenFile();
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    openSearch();
   }
 });
 

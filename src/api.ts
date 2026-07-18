@@ -142,6 +142,43 @@ export async function fetchChannelMessages(
   return data.messages || [];
 }
 
+/** Load a window of messages centered on a specific message (seekable timeline).
+ *  Used to jump to a search hit that isn't in the loaded tail. */
+export async function fetchMessagesAround(
+  channelId: string,
+  messageId: string,
+  limit = 50,
+): Promise<{ messages: ChannelMessage[]; hasNewer: boolean }> {
+  const data = await apiFetch<{ messages: ChannelMessage[]; has_newer?: boolean }>(
+    `/channels/${channelId}/messages?around=${encodeURIComponent(messageId)}&limit=${limit}&team=local`,
+  );
+  return { messages: data.messages || [], hasNewer: !!data.has_newer };
+}
+
+/** Message-count per day for the calendar heatmap: { "2026-06-01": 5, … } */
+export async function fetchCalendarDates(channelId: string): Promise<Record<string, number>> {
+  const data = await apiFetch<{ dates: Record<string, number> }>(
+    `/channels/${channelId}/messages/calendar?team=local`,
+  );
+  return data.dates || {};
+}
+
+export interface CalendarDayMessage {
+  id: string;
+  timestamp: string;
+  from: string;
+  direction: string;
+  filename: string;
+}
+
+/** All messages for a specific day (YYYY-MM-DD), lightweight (no content). */
+export async function fetchCalendarDay(channelId: string, date: string): Promise<CalendarDayMessage[]> {
+  const data = await apiFetch<{ messages: CalendarDayMessage[] }>(
+    `/channels/${channelId}/messages/calendar?date=${encodeURIComponent(date)}&team=local`,
+  );
+  return data.messages || [];
+}
+
 export async function postChannelMessage(
   channelId: string,
   content: string
@@ -187,6 +224,24 @@ export async function setChannelAgent(channelId: string, agentId: string): Promi
 
 export async function getChannelConfig(channelId: string): Promise<Record<string, unknown>> {
   return apiFetch<Record<string, unknown>>(`/channels/${channelId}/config`);
+}
+
+export interface ChannelSearchResult {
+  ref: string; // "channelname/YYYY-MM-DD/NNN_dir_x.md"
+  excerpt: string;
+  message_id?: string;
+}
+
+/** Full-text (or regex) search over a channel's message history. */
+export async function searchChannelMessages(
+  channelId: string,
+  q: string,
+  regex = false,
+): Promise<ChannelSearchResult[]> {
+  const data = await apiFetch<{ results: ChannelSearchResult[] }>(
+    `/channels/${channelId}/messages/search?q=${encodeURIComponent(q)}&regex=${regex}&team=local`,
+  );
+  return data.results || [];
 }
 
 export function createChannelWebSocket(channelId: string): WebSocket {
