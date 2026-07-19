@@ -6,6 +6,8 @@ import {
   fetchMessagesAround,
   fetchCalendarDates,
   fetchCalendarDay,
+  fetchMessageContent,
+  type CalendarDayMessage,
   postChannelMessage,
   createChannelWebSocket,
   markChannelRead,
@@ -172,42 +174,113 @@ registerPanel("search", () => {
 function mountCalendarView(host: HTMLElement): void {
   if (!currentChannel) { host.innerHTML = `<div class="search-placeholder">Open a channel first.</div>`; return; }
   const channelId = currentChannel.id;
+  // Two views (master-detail): the picker (month → hour grid) and the results
+  // list with a Back button. Same drill-down model as the webapp calendar.
   host.innerHTML = `
-    <div class="cal-head">
-      <button class="cal-nav cal-prev" type="button">&#8249;</button>
-      <span class="cal-title"></span>
-      <button class="cal-nav cal-next" type="button">&#8250;</button>
+    <div class="cal-picker">
+      <div class="cal-head">
+        <button class="cal-nav cal-prev" type="button">&#8249;</button>
+        <span class="cal-title"></span>
+        <button class="cal-nav cal-next" type="button">&#8250;</button>
+      </div>
+      <div class="cal-dow"></div>
+      <div class="cal-grid"><div class="search-status">Loading…</div></div>
+      <div class="cal-hours-wrap"></div>
     </div>
-    <div class="cal-dow"></div>
-    <div class="cal-grid"><div class="search-status">Loading…</div></div>
-    <div class="cal-day"></div>`;
+    <div class="cal-results" hidden>
+      <div class="cal-results-head">
+        <button class="cal-back" type="button">&#8249; Back</button>
+        <span class="cal-results-title"></span>
+      </div>
+      <div class="cal-msg-list"></div>
+    </div>`;
+  const pickerEl = host.querySelector(".cal-picker") as HTMLElement;
+  const resultsEl = host.querySelector(".cal-results") as HTMLElement;
   const titleEl = host.querySelector(".cal-title") as HTMLElement;
   const dowEl = host.querySelector(".cal-dow") as HTMLElement;
   const gridEl = host.querySelector(".cal-grid") as HTMLElement;
-  const dayEl = host.querySelector(".cal-day") as HTMLElement;
+  const hoursWrap = host.querySelector(".cal-hours-wrap") as HTMLElement;
+  const resultsTitle = host.querySelector(".cal-results-title") as HTMLElement;
+  const listEl = host.querySelector(".cal-msg-list") as HTMLElement;
   dowEl.innerHTML = ["S", "M", "T", "W", "T", "F", "S"].map((d) => `<span>${d}</span>`).join("");
 
   let dates: Record<string, number> = {};
   let view = new Date();
+  let selectedDate = "";
+  let dayMessages: CalendarDayMessage[] = [];
+  let dayObserver: IntersectionObserver | null = null;
+
   const iso = (y: number, m: number, d: number) =>
     `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  // timestamps are ISO strings ("2026-07-13T16:01:09…"), so Date parses them directly.
+  const hourOf = (ts: string): number | null => { const d = new Date(ts); return isNaN(d.getTime()) ? null : d.getHours(); };
+  const timeOf = (ts: string): string => { const d = new Date(ts); return isNaN(d.getTime()) ? "" : d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }); };
+  const hourLabel = (h: number) => `${(h % 12) || 12} ${h < 12 ? "AM" : "PM"}`;
+  const formatDayLong = (d: string) => { const dt = new Date(d + "T00:00:00"); return isNaN(dt.getTime()) ? d : dt.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }); };
+
+  // --- Results view (detail) ---
+  const renderList = (subset: CalendarDayMessage[]) => {
+    dayObserver?.disconnect();
+    listEl.innerHTML = subset.map((mm) => {
+      const who = mm.direction === "in" ? "You" : (mm.from || "agent");
+      const ref = `${channelId}/${selectedDate}/${mm.filename}`;
+      return `<div class="cal-msg" data-id="${escapeHtml(mm.id)}" data-ref="${escapeHtml(ref)}">` +
+        `<div class="cal-msg-head"><span class="cal-msg-time">${escapeHtml(timeOf(mm.timestamp))}</span><span class="cal-msg-who">${escapeHtml(who)}</span></div>` +
+        `<div class="cal-msg-preview" data-preview></div></div>`;
+    }).join("") || `<div class="search-status">No messages.</div>`;
+    listEl.querySelectorAll(".cal-msg").forEach((r) =>
+      r.addEventListener("click", () => jumpToMessage((r as HTMLElement).dataset.id)));
+    dayObserver = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const el = e.target as HTMLElement;
+        dayObserver!.unobserve(el);
+        const pv = el.querySelector("[data-preview]") as HTMLElement;
+        fetchMessageContent(el.dataset.ref!).then((raw) => { if (raw) pv.textContent = messagePreview(raw); }).catch(() => {});
+      }
+    }, { root: listEl, rootMargin: "150px" });
+    listEl.querySelectorAll(".cal-msg").forEach((el) => dayObserver!.observe(el));
+  };
+  const showResults = (subset: CalendarDayMessage[], label: string) => {
+    resultsTitle.textContent = `${formatDayLong(selectedDate)} · ${label}`;
+    listEl.scrollTop = 0;
+    pickerEl.hidden = true;
+    resultsEl.hidden = false;
+    renderList(subset);
+  };
+  const showPicker = () => { dayObserver?.disconnect(); resultsEl.hidden = true; pickerEl.hidden = false; };
+  (host.querySelector(".cal-back") as HTMLElement).addEventListener("click", showPicker);
+
+  // --- Picker view (master): month grid → the day's hour grid ---
+  const renderHours = () => {
+    const hourCounts = new Array(24).fill(0);
+    for (const m of dayMessages) { const h = hourOf(m.timestamp); if (h !== null) hourCounts[h]++; }
+    const hourCells = hourCounts.map((c, h) =>
+      `<button class="cal-hour" data-hour="${h}" ${c ? "" : "disabled"} type="button">` +
+        `<span class="cal-hour-label">${hourLabel(h)}</span>` +
+        (c ? `<span class="cal-hour-count">${c}</span>` : "") +
+      `</button>`).join("");
+    hoursWrap.innerHTML =
+      `<div class="cal-day-title"><span>${escapeHtml(formatDayLong(selectedDate))} · ${dayMessages.length} message${dayMessages.length === 1 ? "" : "s"}</span>` +
+        `<button class="cal-viewall" type="button">View all</button></div>` +
+      `<div class="cal-hours">${hourCells}</div>`;
+    (hoursWrap.querySelector(".cal-viewall") as HTMLElement).addEventListener("click", () => showResults(dayMessages, "all day"));
+    hoursWrap.querySelectorAll(".cal-hour").forEach((btn) => {
+      if ((btn as HTMLButtonElement).disabled) return;
+      btn.addEventListener("click", () => {
+        const h = (btn as HTMLElement).dataset.hour!;
+        showResults(dayMessages.filter((m) => String(hourOf(m.timestamp)) === h), hourLabel(Number(h)));
+      });
+    });
+  };
 
   const loadDay = async (date: string) => {
-    dayEl.innerHTML = `<div class="cal-day-title">${date}</div><div class="search-status">Loading…</div>`;
-    try {
-      const msgs = await fetchCalendarDay(channelId, date);
-      const rows = msgs.map((mm) => {
-        const n = Number(mm.timestamp);
-        const t = isFinite(n) ? new Date(n * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "";
-        const who = mm.direction === "in" ? "You" : (mm.from || "agent");
-        return `<div class="cal-msg" data-id="${escapeHtml(mm.id)}"><span class="cal-msg-time">${escapeHtml(t)}</span><span class="cal-msg-who">${escapeHtml(who)}</span></div>`;
-      }).join("");
-      dayEl.innerHTML = `<div class="cal-day-title">${date} · ${msgs.length} message${msgs.length === 1 ? "" : "s"}</div><div class="cal-msg-list">${rows}</div>`;
-      dayEl.querySelectorAll(".cal-msg").forEach((r) =>
-        r.addEventListener("click", () => jumpToMessage((r as HTMLElement).dataset.id)));
-    } catch {
-      dayEl.innerHTML = `<div class="search-status">Failed to load day.</div>`;
-    }
+    selectedDate = date;
+    gridEl.querySelectorAll(".cal-cell").forEach((c) => c.classList.toggle("selected", (c as HTMLElement).dataset.date === date));
+    hoursWrap.innerHTML = `<div class="search-status">Loading…</div>`;
+    try { dayMessages = await fetchCalendarDay(channelId, date); }
+    catch { hoursWrap.innerHTML = `<div class="search-status">Failed to load day.</div>`; return; }
+    renderHours();
   };
 
   const renderGrid = () => {
@@ -223,7 +296,7 @@ function mountCalendarView(host: HTMLElement): void {
       const c = dates[key] || 0;
       const intensity = c ? (0.15 + 0.5 * Math.min(1, c / max)).toFixed(2) : "0";
       const style = c ? ` style="background:rgba(97,175,239,${intensity})" title="${c} messages"` : "";
-      html += `<button class="cal-cell${c ? " active" : ""}" data-date="${key}"${style} type="button" ${c ? "" : "disabled"}>${d}</button>`;
+      html += `<button class="cal-cell${c ? " active" : ""}${key === selectedDate ? " selected" : ""}" data-date="${key}"${style} type="button" ${c ? "" : "disabled"}>${d}</button>`;
     }
     gridEl.innerHTML = html;
     gridEl.querySelectorAll(".cal-cell.active").forEach((cell) =>
@@ -316,6 +389,18 @@ function highlightMatch(escapedText: string, q: string, isRegex: boolean): strin
   } catch {
     return escapedText;
   }
+}
+
+/** Clean one-line preview from a raw message .md file — drop the header block
+ *  (ID/TIMESTAMP/FROM/DIRECTION), the trailing LINKS: footer, and collapse space. */
+function messagePreview(raw: string): string {
+  const lines = raw.split("\n");
+  let i = 0;
+  while (i < lines.length && (/^(ID|TIMESTAMP|FROM|DIRECTION):/.test(lines[i]) || lines[i].trim() === "")) i++;
+  let body = lines.slice(i).join("\n");
+  const linkIdx = body.lastIndexOf("\nLINKS: ");
+  if (linkIdx !== -1) body = body.slice(0, linkIdx);
+  return body.replace(/\s+/g, " ").trim().slice(0, 160);
 }
 
 function currentThemeMode(): "light" | "dark" {

@@ -179,6 +179,14 @@ export async function fetchCalendarDay(channelId: string, date: string): Promise
   return data.messages || [];
 }
 
+/** Full raw content of a single message file, by ref ("channel/date/file.md"). */
+export async function fetchMessageContent(ref: string): Promise<string | null> {
+  const data = await apiFetch<{ content: string | null }>(
+    `/knowledge-graph/message?ref=${encodeURIComponent(ref)}&team=local`,
+  );
+  return data.content ?? null;
+}
+
 export async function postChannelMessage(
   channelId: string,
   content: string
