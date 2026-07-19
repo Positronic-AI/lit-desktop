@@ -43,6 +43,7 @@ import { openTerminal, closeTerminal, isTerminalOpen, fitToGrid } from "./termin
 import { brand } from "./brand";
 import { WindowManager } from "./window-manager";
 import { registerPanel } from "./panel-host";
+import { mountGraphView } from "./graph-view";
 import "dockview-core/dist/styles/dockview.css";
 
 // --- Docking shell (Step 1: chat becomes a dockview panel) ---
@@ -92,6 +93,7 @@ registerPanel("viewer", () => ({
 // loaded scrolls to it and flashes it; older hits still show their excerpt.
 registerPanel("search", () => {
   let textDebounce: ReturnType<typeof setTimeout> | undefined;
+  let graphDispose: (() => void) | null = null;
   return {
     mount(host: HTMLElement) {
       host.innerHTML = `
@@ -109,11 +111,20 @@ registerPanel("search", () => {
       const bodies = Array.from(host.querySelectorAll(".search-tab-body")) as HTMLElement[];
       const bodyFor = (n: string) => bodies.find((b) => b.dataset.body === n)!;
       let calendarLoaded = false;
+      let graphLoaded = false;
 
       const select = (name: string) => {
         tabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
         bodies.forEach((b) => (b.hidden = b.dataset.body !== name));
         if (name === "calendar" && !calendarLoaded) { calendarLoaded = true; mountCalendarView(bodyFor("calendar")); }
+        if (name === "graph" && !graphLoaded && currentChannel) {
+          graphLoaded = true;
+          graphDispose = mountGraphView(bodyFor("graph"), {
+            channelId: currentChannel.id,
+            jumpToMessage,
+            escapeHtml,
+          });
+        }
         if (name === "text") (host.querySelector(".search-input") as HTMLInputElement | null)?.focus();
       };
       tabs.forEach((t) => t.addEventListener("click", () => select(t.dataset.tab!)));
@@ -161,11 +172,11 @@ registerPanel("search", () => {
       regexCb.addEventListener("change", run);
       setTimeout(() => input.focus(), 30);
 
-      // --- Knowledge Graph tab (its own build next) ---
+      // --- Knowledge Graph tab: lazily mounted on first select (see `select`). ---
       bodyFor("graph").innerHTML =
-        `<div class="search-placeholder">The knowledge-graph view lands in its own build — the backend's already wired.</div>`;
+        `<div class="search-placeholder">Open a channel to explore its knowledge graph.</div>`;
     },
-    dispose() { clearTimeout(textDebounce); },
+    dispose() { clearTimeout(textDebounce); graphDispose?.(); },
   };
 });
 

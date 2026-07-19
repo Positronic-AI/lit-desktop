@@ -187,6 +187,23 @@ export async function fetchMessageContent(ref: string): Promise<string | null> {
   return data.content ?? null;
 }
 
+export interface GraphNode {
+  id: string;
+  type: string;
+  label?: string;
+  count: number;
+  messages: { ref: string; excerpt: string; message_id?: string }[];
+}
+export interface GraphEdge { source: string; target: string; weight: number; }
+
+/** Knowledge-graph nodes+edges built from the channel's LINKS: footers. */
+export async function fetchKnowledgeGraph(channelId: string): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
+  const data = await apiFetch<{ nodes?: GraphNode[]; edges?: GraphEdge[] }>(
+    `/knowledge-graph?channel=${encodeURIComponent(channelId)}&team=local`,
+  );
+  return { nodes: data.nodes || [], edges: data.edges || [] };
+}
+
 export async function postChannelMessage(
   channelId: string,
   content: string
