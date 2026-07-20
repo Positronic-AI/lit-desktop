@@ -82,6 +82,55 @@ export function setServer(config: ServerConfig) {
   currentServer = config;
 }
 
+// ---- Teams (workspace separation) ----
+// The active team scopes every data call (channels/agents/credentials/search/KG).
+// Backend auto-creates the default "local" team; data lives under ~/.lit/data/{team}/.
+
+export interface TeamInfo {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  members: string[];
+  agent_ids?: string[];
+}
+
+const TEAM_KEY = "lit-active-team";
+let activeTeam = localStorage.getItem(TEAM_KEY) || "local";
+
+export function getActiveTeam(): string {
+  return activeTeam;
+}
+
+export function setActiveTeam(slug: string) {
+  activeTeam = slug;
+  localStorage.setItem(TEAM_KEY, slug);
+}
+
+export async function fetchTeams(): Promise<TeamInfo[]> {
+  return apiFetch<TeamInfo[]>("/organizations");
+}
+
+export async function createTeam(name: string, slug: string, description = ""): Promise<TeamInfo> {
+  return apiFetch<TeamInfo>("/organizations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, slug, description }),
+  });
+}
+
+export async function updateTeam(orgId: string, data: { name?: string; description?: string }): Promise<TeamInfo> {
+  return apiFetch<TeamInfo>(`/organizations/${orgId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteTeam(orgId: string): Promise<void> {
+  await apiFetch(`/organizations/${orgId}`, { method: "DELETE" });
+}
+
 export async function checkConnection(): Promise<boolean> {
   try {
     await apiFetch("/agents");
@@ -106,13 +155,13 @@ export async function readServerFile(path: string): Promise<string> {
 }
 
 export async function fetchAgents(): Promise<Agent[]> {
-  const data = await apiFetch<{ agents: Agent[] }>("/agents");
+  const data = await apiFetch<{ agents: Agent[] }>(`/agents?team=${activeTeam}`);
   return data.agents;
 }
 
 export async function fetchChannels(): Promise<Channel[]> {
   const [nav, unread] = await Promise.all([
-    apiFetch<{ personal_channels: Array<{ id: string; name: string; folder_path?: string }> }>("/navigation"),
+    apiFetch<{ personal_channels: Array<{ id: string; name: string; folder_path?: string }> }>(`/navigation?team=${activeTeam}`),
     apiFetch<{ channels: Array<{ id: string; unreadCount: number }> }>("/channels/unread").catch(() => ({ channels: [] })),
   ]);
 
@@ -128,7 +177,7 @@ export async function createChannel(name: string): Promise<{ id: string }> {
   return apiFetch<{ id: string }>("/channels", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, team: activeTeam }),
   });
 }
 
@@ -137,7 +186,7 @@ export async function fetchChannelMessages(
   limit = 50,
 ): Promise<ChannelMessage[]> {
   const data = await apiFetch<{ messages: ChannelMessage[] }>(
-    `/channels/${channelId}/messages?limit=${limit}`
+    `/channels/${channelId}/messages?limit=${limit}&team=${activeTeam}`
   );
   return data.messages || [];
 }
@@ -150,7 +199,7 @@ export async function fetchMessagesAround(
   limit = 50,
 ): Promise<{ messages: ChannelMessage[]; hasNewer: boolean }> {
   const data = await apiFetch<{ messages: ChannelMessage[]; has_newer?: boolean }>(
-    `/channels/${channelId}/messages?around=${encodeURIComponent(messageId)}&limit=${limit}&team=local`,
+    `/channels/${channelId}/messages?around=${encodeURIComponent(messageId)}&limit=${limit}&team=${activeTeam}`,
   );
   return { messages: data.messages || [], hasNewer: !!data.has_newer };
 }
@@ -158,7 +207,7 @@ export async function fetchMessagesAround(
 /** Message-count per day for the calendar heatmap: { "2026-06-01": 5, … } */
 export async function fetchCalendarDates(channelId: string): Promise<Record<string, number>> {
   const data = await apiFetch<{ dates: Record<string, number> }>(
-    `/channels/${channelId}/messages/calendar?team=local`,
+    `/channels/${channelId}/messages/calendar?team=${activeTeam}`,
   );
   return data.dates || {};
 }
@@ -174,7 +223,7 @@ export interface CalendarDayMessage {
 /** All messages for a specific day (YYYY-MM-DD), lightweight (no content). */
 export async function fetchCalendarDay(channelId: string, date: string): Promise<CalendarDayMessage[]> {
   const data = await apiFetch<{ messages: CalendarDayMessage[] }>(
-    `/channels/${channelId}/messages/calendar?date=${encodeURIComponent(date)}&team=local`,
+    `/channels/${channelId}/messages/calendar?date=${encodeURIComponent(date)}&team=${activeTeam}`,
   );
   return data.messages || [];
 }
@@ -182,7 +231,7 @@ export async function fetchCalendarDay(channelId: string, date: string): Promise
 /** Full raw content of a single message file, by ref ("channel/date/file.md"). */
 export async function fetchMessageContent(ref: string): Promise<string | null> {
   const data = await apiFetch<{ content: string | null }>(
-    `/knowledge-graph/message?ref=${encodeURIComponent(ref)}&team=local`,
+    `/knowledge-graph/message?ref=${encodeURIComponent(ref)}&team=${activeTeam}`,
   );
   return data.content ?? null;
 }
@@ -199,7 +248,7 @@ export interface GraphEdge { source: string; target: string; weight: number; }
 /** Knowledge-graph nodes+edges built from the channel's LINKS: footers. */
 export async function fetchKnowledgeGraph(channelId: string): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
   const data = await apiFetch<{ nodes?: GraphNode[]; edges?: GraphEdge[] }>(
-    `/knowledge-graph?channel=${encodeURIComponent(channelId)}&team=local`,
+    `/knowledge-graph?channel=${encodeURIComponent(channelId)}&team=${activeTeam}`,
   );
   return { nodes: data.nodes || [], edges: data.edges || [] };
 }
@@ -211,7 +260,7 @@ export async function postChannelMessage(
   await apiFetch(`/channels/${channelId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, team: activeTeam }),
   });
 }
 
@@ -219,7 +268,7 @@ export async function openFolder(folderPath: string, name?: string): Promise<{ i
   const res = await fetch(`${currentServer.url}/mux/channels/open-folder`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ folder_path: folderPath, name }),
+    body: JSON.stringify({ folder_path: folderPath, name, team: activeTeam }),
   });
 
   if (res.status === 409) {
@@ -235,7 +284,7 @@ export async function markChannelRead(channelId: string): Promise<void> {
   await apiFetch(`/channels/${channelId}/mark-read`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ team: activeTeam }),
   });
 }
 
@@ -243,12 +292,12 @@ export async function setChannelAgent(channelId: string, agentId: string): Promi
   await fetch(`${currentServer.url}/mux/channels/${channelId}/config`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agent_id: agentId }),
+    body: JSON.stringify({ agent_id: agentId, team: activeTeam }),
   });
 }
 
 export async function getChannelConfig(channelId: string): Promise<Record<string, unknown>> {
-  return apiFetch<Record<string, unknown>>(`/channels/${channelId}/config`);
+  return apiFetch<Record<string, unknown>>(`/channels/${channelId}/config?team=${activeTeam}`);
 }
 
 export interface ChannelSearchResult {
@@ -264,7 +313,7 @@ export async function searchChannelMessages(
   regex = false,
 ): Promise<ChannelSearchResult[]> {
   const data = await apiFetch<{ results: ChannelSearchResult[] }>(
-    `/channels/${channelId}/messages/search?q=${encodeURIComponent(q)}&regex=${regex}&team=local`,
+    `/channels/${channelId}/messages/search?q=${encodeURIComponent(q)}&regex=${regex}&team=${activeTeam}`,
   );
   return data.results || [];
 }
@@ -408,7 +457,7 @@ export async function listCredentials(team = "local"): Promise<Credential[]> {
 
 export async function createCredential(
   req: { id: string; name: string; vendor: Vendor; mode: CredMode },
-  team = "local",
+  team = getActiveTeam(),
 ): Promise<Credential> {
   return apiFetch<Credential>(`/credentials?team=${team}`, {
     method: "POST",
@@ -420,7 +469,7 @@ export async function createCredential(
 export async function updateCredential(
   cid: string,
   updates: { name?: string; status?: CredStatus },
-  team = "local",
+  team = getActiveTeam(),
 ): Promise<Credential> {
   return apiFetch<Credential>(`/credentials/${cid}?team=${team}`, {
     method: "PATCH",

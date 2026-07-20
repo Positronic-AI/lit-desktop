@@ -6,7 +6,7 @@ import {
   setCredentialApiKey, fetchBackendStatus, backendForVendorMode,
   startOAuth, oauthStatus, submitOAuthCode, cancelOAuth,
   fetchModelsWithConstraints, fetchFullAgents, getAgent, saveAgent, deleteAgent,
-  fetchDefaultPrompt,
+  fetchDefaultPrompt, getServer, getActiveTeam,
   type Credential, type Vendor, type CredMode, type FullAgent,
   type BackendModel,
 } from "./api";
@@ -151,9 +151,49 @@ function renderSetup(): void {
   agentRoot = el("div", "setup-section-body");
   agentSection.appendChild(agentRoot);
 
-  bodyEl.append(connSection, agentSection);
+  const toolsSection = el("div", "setup-section");
+  toolsSection.appendChild(el("h3", "setup-section-title", "Connect your tools"));
+  const toolsRoot = el("div", "setup-section-body");
+  toolsRoot.appendChild(buildToolsFrame());
+  toolsSection.appendChild(toolsRoot);
+
+  bodyEl.append(connSection, agentSection, toolsSection);
   renderConnections();
   renderAgents();
+}
+
+/** "Connect your tools" — hosts the team's connector app in an iframe served
+ *  from the sidecar's own origin, so the app's relative /mux fetches and its
+ *  OAuth redirect_uri self-align with the backend.
+ *  Team→app map is provisional (the IP boundary made visible: JovAI's
+ *  integrations-hub in their team, litai's google-workspace elsewhere) —
+ *  replace with real app discovery when Team Apps lands. */
+const TEAM_CONNECTOR_APPS: Record<string, [string, string]> = {
+  jovai: ["jovai", "integrations-hub"],
+};
+
+function buildToolsFrame(): HTMLIFrameElement {
+  const frame = document.createElement("iframe");
+  frame.className = "tools-app-frame";
+  const [appTeam, appName] = TEAM_CONNECTOR_APPS[getActiveTeam()] || ["everyone", "google-workspace"];
+  frame.src = `${getServer().url}/mux/app-host/${appTeam}/${appName}?operating_team=${encodeURIComponent(getActiveTeam())}`;
+  const postTheme = () => {
+    const theme = document.documentElement.getAttribute("data-theme") || "dark";
+    frame.contentWindow?.postMessage({ type: "lit-theme", theme }, "*");
+  };
+  frame.addEventListener("load", postTheme);
+  new MutationObserver(postTheme).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-theme"],
+  });
+  // The hosted app's window.open is forwarded here (webviews swallow popups);
+  // open auth URLs in the system browser instead.
+  window.addEventListener("message", (ev) => {
+    if (ev.source === frame.contentWindow && ev.data?.type === "lit-open-url") {
+      openExternal(ev.data.url);
+    }
+  });
+  return frame;
 }
 
 // --- Connections tab -------------------------------------------------------

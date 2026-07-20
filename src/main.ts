@@ -28,6 +28,11 @@ import {
   getServer,
   readServerFile,
   searchChannelMessages,
+  fetchTeams,
+  createTeam,
+  getActiveTeam,
+  setActiveTeam,
+  type TeamInfo,
   type Agent,
   type Channel,
   type BackendModel,
@@ -646,6 +651,111 @@ let usageReports: Record<string, UsageReport> = {};
 // Sidebar state
 let sidebarWidth = parseInt(localStorage.getItem("lit-sidebar-width") || "240");
 let sidebarOpen = localStorage.getItem("lit-sidebar-open") !== "false";
+
+// --- Team rail ---
+// Workspace separation: channels, agents, and credentials all scope to the
+// active team (backend: ?team=<slug> → ~/.lit/data/{team}/). Ported from the
+// webapp toolbar quick-switcher: one initial-button per team at the end of
+// the app toolbar, active team highlighted, one-click switch. Selection
+// persists in localStorage.
+
+let teams: TeamInfo[] = [];
+
+async function renderTeamsRail(): Promise<void> {
+  const host = document.getElementById("toolbar-teams");
+  if (!host) return;
+  try {
+    teams = await fetchTeams();
+  } catch {
+    // Sidecar may still be booting — loadInitialData() re-renders once it's up.
+    return;
+  }
+  host.innerHTML = "";
+  const active = getActiveTeam();
+  for (const t of teams) {
+    const slug = t.slug || t.name;
+    const btn = document.createElement("button");
+    btn.className = "icon-btn header-btn team-btn" + (slug === active ? " active" : "");
+    btn.textContent = (t.name || "?")[0].toUpperCase();
+    btn.title = t.name;
+    btn.addEventListener("click", () => switchTeam(slug));
+    host.appendChild(btn);
+  }
+  const add = document.createElement("button");
+  add.className = "icon-btn header-btn team-btn team-add";
+  add.textContent = "+";
+  add.title = "New team…";
+  add.addEventListener("click", () => {
+    const r = add.getBoundingClientRect();
+    showNewTeamPopover(r.left, r.bottom + 4);
+  });
+  host.appendChild(add);
+}
+
+function switchTeam(slug: string): void {
+  if (slug === getActiveTeam()) return;
+  setActiveTeam(slug);
+  // The whole workspace scopes to the team; a reload swaps it cleanly
+  // (dockview layout and theme persist in localStorage).
+  window.location.reload();
+}
+
+function slugifyTeamName(name: string): string {
+  return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function showNewTeamPopover(x: number, y: number): void {
+  document.getElementById("team-menu")?.remove();
+  const menu = document.createElement("div");
+  menu.id = "team-menu";
+  menu.className = "ctx-menu";
+  const label = document.createElement("div");
+  label.className = "ctx-menu-label";
+  label.textContent = "New team";
+  menu.appendChild(label);
+  menu.appendChild(buildNewTeamRow(menu));
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4)) + "px";
+  menu.style.top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4)) + "px";
+  const dismiss = (ev: MouseEvent) => {
+    if (!menu.contains(ev.target as Node)) {
+      menu.remove();
+      document.removeEventListener("mousedown", dismiss);
+    }
+  };
+  setTimeout(() => document.addEventListener("mousedown", dismiss), 0);
+}
+
+function buildNewTeamRow(menu: HTMLElement): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "team-new-row";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Team name";
+  input.className = "team-new-input";
+  const go = document.createElement("button");
+  go.textContent = "Create";
+  go.className = "team-new-create";
+  const submit = async () => {
+    const name = input.value.trim();
+    if (!name) return;
+    try {
+      await createTeam(name, slugifyTeamName(name));
+      menu.remove();
+      switchTeam(slugifyTeamName(name));
+    } catch (e) {
+      input.style.borderColor = "#f7768e";
+      console.error("create team failed", e);
+    }
+  };
+  go.addEventListener("click", submit);
+  input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") submit(); });
+  row.appendChild(input);
+  row.appendChild(go);
+  setTimeout(() => input.focus(), 0);
+  return row;
+}
 
 function initSidebar() {
   sidebarEl.style.width = sidebarWidth + "px";
@@ -2056,7 +2166,8 @@ async function openChannel(channel: Channel) {
       }
     }
 
-    await markChannelRead(channel.id);
+    // Non-fatal: a mark-read failure must not masquerade as a load failure.
+    markChannelRead(channel.id).catch(() => {});
     connectWebSocket(channel.id);
   } catch (err) {
     renderMessage({ role: "system", content: `Failed to load messages: ${err}` });
@@ -2520,6 +2631,7 @@ async function init() {
   initTheme();
   setStatus("connecting");
   initSidebar();
+  renderTeamsRail();
   setupDock();
   setupAppToolbar();
 
@@ -2575,6 +2687,8 @@ async function init() {
 }
 
 async function loadInitialData() {
+  // The boot-time render races sidecar startup; re-render now that it's up.
+  renderTeamsRail();
   try {
     // Fetch agents, models, and channels in parallel
     const [agentsData, modelsData, remote] = await Promise.all([
@@ -2673,6 +2787,12 @@ function getCommands(): Command[] {
 
   for (const agent of agents) {
     cmds.push({ id: `agent-${agent.id}`, label: `Select agent: ${agent.name}`, icon: "🤖", action: () => selectAgent(agent) });
+  }
+
+  for (const t of teams) {
+    const slug = t.slug || t.name;
+    if (slug === getActiveTeam()) continue;
+    cmds.push({ id: `team-${slug}`, label: `Switch to team: ${t.name}`, icon: "⊞", action: () => switchTeam(slug) });
   }
 
   return cmds;

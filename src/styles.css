@@ -82,18 +82,36 @@ body {
 #app-toolbar {
   display: flex;
   align-items: center;
-  gap: 2px;
-  padding: 3px 6px;
+  gap: 6px;
+  padding: 6px 8px;
   background: var(--bg-secondary);
   z-index: 10;
   -webkit-app-region: no-drag; /* it's our drag target, not the OS window drag */
+}
+
+/* Webapp rail proportions: larger, well-spaced targets in the app toolbar
+   (scoped here so header/search icon buttons elsewhere keep their size). */
+#app-toolbar .icon-btn {
+  font-size: 17px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#app-toolbar .team-btn {
+  width: 30px;
+  height: 30px;
+  font-size: 13px;
 }
 #app[data-toolbar-edge="top"] #app-toolbar { border-bottom: 1px solid var(--border); }
 #app[data-toolbar-edge="bottom"] #app-toolbar { border-top: 1px solid var(--border); }
 #app[data-toolbar-edge="left"] #app-toolbar,
 #app[data-toolbar-edge="right"] #app-toolbar {
   flex-direction: column;
-  padding: 6px 3px;
+  padding: 8px 5px;
 }
 #app[data-toolbar-edge="left"] #app-toolbar { border-right: 1px solid var(--border); }
 #app[data-toolbar-edge="right"] #app-toolbar { border-left: 1px solid var(--border); }
@@ -180,6 +198,81 @@ body {
   width: 0 !important;
   min-width: 0 !important;
   border-right: none;
+}
+
+/* Team rail — one initial-button per team, END-ANCHORED on the app toolbar
+   (webapp design: utilities at the top of the rail, teams pinned at the
+   bottom, flexible space between; generalizes to right-anchored when the
+   toolbar docks horizontally). Active team = filled accent circle. */
+#toolbar-teams {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#app[data-toolbar-edge="left"] #toolbar-teams,
+#app[data-toolbar-edge="right"] #toolbar-teams {
+  flex-direction: column;
+  margin-top: auto;
+}
+
+#app[data-toolbar-edge="top"] #toolbar-teams,
+#app[data-toolbar-edge="bottom"] #toolbar-teams {
+  margin-left: auto;
+}
+
+.team-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+}
+
+.team-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.team-btn.team-add {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.team-new-row {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+}
+
+.team-new-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  background: var(--bg-input, var(--bg-secondary));
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.team-new-create {
+  padding: 4px 10px;
+  background: var(--accent);
+  border: none;
+  border-radius: 5px;
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.team-new-create:hover {
+  background: var(--accent-hover, var(--accent));
 }
 
 /* Sidebar resize handle */
@@ -2274,4 +2367,13 @@ kbd {
 .setup-section-title {
   font-size: 13px; font-weight: 600; color: var(--text-primary);
   margin: 0 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+}
+
+/* "Connect your tools" iframe (google-workspace connector app) */
+.tools-app-frame {
+  width: 100%;
+  min-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-primary);
 }
