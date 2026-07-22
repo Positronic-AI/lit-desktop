@@ -10,11 +10,8 @@ import {
   searchChannelMessages,
   fetchTeams,
   createTeam,
-  getActiveTeam,
-  setActiveTeam,
   getConnections,
   getActiveConnection,
-  setActiveConnectionId,
   activeScope,
   type TeamInfo,
 } from "./api";
@@ -658,18 +655,11 @@ async function startBackend(): Promise<boolean> {
   return false;
 }
 
-// --- Team rail ---
-// Workspace separation: channels, agents, and credentials all scope to the
-// active team (backend: ?team=<slug> → ~/.lit/data/{team}/). Ported from the
-// webapp toolbar quick-switcher: one initial-button per team at the end of
-// the app toolbar, active team highlighted, one-click switch. Selection
-// persists in localStorage.
-
-let teams: TeamInfo[] = [];
-
+// --- Places catalog ---
 // Team lists per connection — the catalog of PLACES you can open a chat tab
-// into (or star). The active connection's list comes from the teams rail; the
-// others load lazily in loadInitialData (signed-in/no-auth connections only).
+// into (or star). Loaded in loadInitialData for every signed-in/no-auth
+// connection. (The old teams rail is retired: switching teams = opening a
+// place tab; its jobs live in the command palette now.)
 const teamsByConn = new Map<string, TeamInfo[]>();
 
 function refreshPlaceCatalog(): void {
@@ -685,115 +675,6 @@ function refreshPlaceCatalog(): void {
       })
       .catch(() => { /* unreachable place — keep any previous list */ });
   }
-}
-
-async function renderTeamsRail(): Promise<void> {
-  const host = document.getElementById("toolbar-teams");
-  if (!host) return;
-  try {
-    teams = await fetchTeams();
-  } catch {
-    // Sidecar may still be booting — loadInitialData() re-renders once it's up.
-    // For a remote connection this is the sleeping-place state: show the server
-    // chip anyway so the user can flip back to a reachable place.
-    host.innerHTML = "";
-    if (getConnections().length > 1) host.appendChild(buildServerChip(true));
-    return;
-  }
-  host.innerHTML = "";
-  // Server chip: which host this rail's teams belong to. Only shown once a
-  // second connection exists — single-server users never see it.
-  if (getConnections().length > 1) host.appendChild(buildServerChip(false));
-  // Cross-host flip: the remembered team may not exist on this host — fall back
-  // to the first team the server offers so channels don't query a ghost namespace.
-  let active = getActiveTeam();
-  if (teams.length && !teams.some((t) => (t.slug || t.name) === active)) {
-    active = teams[0].slug || teams[0].name;
-    setActiveTeam(active);
-  }
-  for (const t of teams) {
-    const slug = t.slug || t.name;
-    const btn = document.createElement("button");
-    btn.className = "icon-btn header-btn team-btn" + (slug === active ? " active" : "");
-    btn.textContent = (t.name || "?")[0].toUpperCase();
-    btn.title = t.name;
-    btn.addEventListener("click", () => switchTeam(slug));
-    host.appendChild(btn);
-  }
-  const add = document.createElement("button");
-  add.className = "icon-btn header-btn team-btn team-add";
-  add.textContent = "+";
-  add.title = "New team…";
-  add.addEventListener("click", () => {
-    const r = add.getBoundingClientRect();
-    showNewTeamPopover(r.left, r.bottom + 4);
-  });
-  host.appendChild(add);
-}
-
-function switchTeam(slug: string): void {
-  if (slug === getActiveTeam()) return;
-  setActiveTeam(slug);
-  // The whole workspace scopes to the team; a reload swaps it cleanly
-  // (dockview layout and theme persist in localStorage).
-  window.location.reload();
-}
-
-/** The active server's chip at the head of the teams rail. Click → connection
- *  menu. Flipping connections reloads, same as flipping teams (VS Code reloads
- *  the window on remote connect — same precedent, same reason). */
-function buildServerChip(unreachable: boolean): HTMLElement {
-  const conn = getActiveConnection();
-  const chip = document.createElement("button");
-  chip.className = "icon-btn header-btn server-chip" + (unreachable ? " unreachable" : "");
-  chip.textContent = conn.id === "local" ? "⌂" : (conn.name || "?")[0].toUpperCase();
-  chip.title = unreachable
-    ? `${conn.name} — unreachable`
-    : `Server: ${conn.name} (${conn.url})`;
-  chip.addEventListener("click", () => {
-    const r = chip.getBoundingClientRect();
-    showServerMenu(r.left, r.bottom + 4);
-  });
-  return chip;
-}
-
-function showServerMenu(x: number, y: number): void {
-  document.getElementById("server-menu")?.remove();
-  const menu = document.createElement("div");
-  menu.id = "server-menu";
-  menu.className = "context-menu";
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
-  const active = getActiveConnection();
-  for (const c of getConnections()) {
-    const row = document.createElement("div");
-    row.className = "context-menu-item" + (c.id === active.id ? " active" : "");
-    row.textContent = `${c.id === active.id ? "✓ " : ""}${c.name}`;
-    row.title = c.url;
-    row.addEventListener("click", () => {
-      menu.remove();
-      if (c.id === active.id) return;
-      setActiveConnectionId(c.id);
-      window.location.reload();
-    });
-    menu.appendChild(row);
-  }
-  const manage = document.createElement("div");
-  manage.className = "context-menu-item";
-  manage.textContent = "Manage servers…";
-  manage.addEventListener("click", () => {
-    menu.remove();
-    openSettings();
-  });
-  menu.appendChild(manage);
-  document.body.appendChild(menu);
-  const dismiss = (e: MouseEvent) => {
-    if (!menu.contains(e.target as Node)) {
-      menu.remove();
-      document.removeEventListener("mousedown", dismiss);
-    }
-  };
-  setTimeout(() => document.addEventListener("mousedown", dismiss), 0);
 }
 
 function slugifyTeamName(name: string): string {
@@ -839,7 +720,9 @@ function buildNewTeamRow(menu: HTMLElement): HTMLElement {
     try {
       await createTeam(name, slugifyTeamName(name));
       menu.remove();
-      switchTeam(slugifyTeamName(name));
+      // A new team is a new place: refresh the catalog and stand in it.
+      refreshPlaceCatalog();
+      openChatTab(getActiveConnection().id, slugifyTeamName(name));
     } catch (e) {
       input.style.borderColor = "#f7768e";
       console.error("create team failed", e);
@@ -910,7 +793,6 @@ async function init() {
   document.title = brand.windowTitle;
   initTheme();
   setStatus("connecting");
-  renderTeamsRail();
   setupDock();
   setupAppToolbar();
 
@@ -961,7 +843,6 @@ async function init() {
 
 async function loadInitialData() {
   // The boot-time render races sidecar startup; re-render now that it's up.
-  renderTeamsRail();
   // Team apps for the command palette / app panels (non-critical).
   fetchApps(activeChat().scope)
     .then((apps) => { appsCache = apps; })
@@ -1003,11 +884,13 @@ function getCommands(): Command[] {
     cmds.push({ id: `agent-${agent.id}`, label: `Select agent: ${agent.name}`, icon: "🤖", action: () => activeChat().selectAgent(agent) });
   }
 
-  for (const t of teams) {
-    const slug = t.slug || t.name;
-    if (slug === getActiveTeam()) continue;
-    cmds.push({ id: `team-${slug}`, label: `Switch to team: ${t.name}`, icon: "⊞", action: () => switchTeam(slug) });
-  }
+  cmds.push({
+    id: "new-team", label: "New Team…", icon: "⊞", action: () => {
+      const r = document.getElementById("toolbar-add")?.getBoundingClientRect();
+      showNewTeamPopover(r ? r.left : 100, r ? r.bottom + 4 : 100);
+    },
+  });
+  cmds.push({ id: "manage-servers", label: "Manage Servers…", icon: "🌐", action: () => openSettings(() => loadInitialData()) });
 
   // Places: open (or focus) a chat tab standing in a (server, team) — any team
   // on any connected server. Pinning one of these to the toolbar (the palette's
