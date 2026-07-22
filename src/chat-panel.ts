@@ -67,11 +67,6 @@ function mergeChannels(local: Channel[], remote: Channel[]): Channel[] {
   return Array.from(map.values());
 }
 
-function loadLocalChannels(): Channel[] {
-  try {
-    return JSON.parse(localStorage.getItem("lit-desktop-channels") || "[]");
-  } catch { return []; }
-}
 
 // --- Tool call parsing ---
 
@@ -658,7 +653,7 @@ export class ChatPanel {
   agents: Agent[] = [];
   private channelWs: WebSocket | null = null;
   private knownMessageIds = new Set<string>();
-  private localChannels: Channel[] = loadLocalChannels();
+  private localChannels: Channel[] = [];
   private channelListCache: Channel[] = [];
   private userIsScrolledUp = false;
   private streamingChannels = new Set<string>();
@@ -670,8 +665,9 @@ export class ChatPanel {
   private usageReports: Record<string, UsageReport> = {};
 
   // Sidebar state
-  private sidebarWidth = parseInt(localStorage.getItem("lit-sidebar-width") || "240");
-  private sidebarOpen = localStorage.getItem("lit-sidebar-open") !== "false";
+  // Per-place prefs — loaded in the constructor once scope exists.
+  private sidebarWidth = 240;
+  private sidebarOpen = true;
 
   // WS reconnect state
   private wsReconnectAttempt = 0;
@@ -735,6 +731,30 @@ export class ChatPanel {
 
   constructor(scope: Scope) {
     this.scope = scope;
+    this.localChannels = this.loadLocalChannels();
+    // Nav width/visibility are per-place layout prefs (a jovai tab and a local
+    // tab can differ); legacy unscoped values seed the local place.
+    const width = localStorage.getItem(this.scopedKey("lit-sidebar-width"))
+      ?? (this.scope.connection.id === "local" ? localStorage.getItem("lit-sidebar-width") : null);
+    this.sidebarWidth = parseInt(width || "240");
+    const openPref = localStorage.getItem(this.scopedKey("lit-sidebar-open"))
+      ?? (this.scope.connection.id === "local" ? localStorage.getItem("lit-sidebar-open") : null);
+    this.sidebarOpen = openPref !== "false";
+  }
+
+  /** Per-place localStorage key — each (server, team) keeps its own channel
+   *  memory, so a remote tab can never prune another place's channels. */
+  private scopedKey(base: string): string {
+    return `${base}:${this.scope.connection.id}:${this.scope.team}`;
+  }
+
+  private loadLocalChannels(): Channel[] {
+    try {
+      const raw = localStorage.getItem(this.scopedKey("lit-desktop-channels"))
+        // Legacy unscoped key — pre-multi-tab data, local connection only.
+        ?? (this.scope.connection.id === "local" ? localStorage.getItem("lit-desktop-channels") : null);
+      return JSON.parse(raw || "[]");
+    } catch { return []; }
   }
 
   // --- Lifecycle ---
@@ -805,6 +825,11 @@ export class ChatPanel {
     (this.root!.querySelector(".search-toggle-btn") as HTMLElement)
       .addEventListener("click", () => this.onOpenSearch?.());
     this.terminalToggleBtn.addEventListener("click", () => this.onToggleTerminal?.());
+
+    // With the nav hidden, the channel title doubles as the channel selector.
+    this.channelTitle.addEventListener("click", (e) => {
+      if (!this.sidebarOpen) this.showChannelTitleMenu(e);
+    });
 
     // Image lightbox trigger — the lightbox itself stays app-level in main.ts.
     this.messagesEl.addEventListener("click", (e) => {
@@ -893,7 +918,7 @@ export class ChatPanel {
       const onUp = () => {
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
-        localStorage.setItem("lit-sidebar-width", String(this.sidebarWidth));
+        localStorage.setItem(this.scopedKey("lit-sidebar-width"), String(this.sidebarWidth));
       };
 
       document.addEventListener("mousemove", onMove);
@@ -906,7 +931,10 @@ export class ChatPanel {
     this.sidebarEl.classList.add("collapsed");
     this.sidebarResizeHandle.style.display = "none";
     this.sidebarExpandBtn.style.display = "";
-    localStorage.setItem("lit-sidebar-open", "false");
+    // Webapp parity: with the nav hidden, the channel title becomes the
+    // channel selector (dropdown), so switching never requires re-showing it.
+    this.channelTitle.classList.add("channel-title-menu");
+    localStorage.setItem(this.scopedKey("lit-sidebar-open"), "false");
   }
 
   private expandSidebar(): void {
@@ -914,7 +942,20 @@ export class ChatPanel {
     this.sidebarEl.classList.remove("collapsed");
     this.sidebarResizeHandle.style.display = "";
     this.sidebarExpandBtn.style.display = "none";
-    localStorage.setItem("lit-sidebar-open", "true");
+    this.channelTitle.classList.remove("channel-title-menu");
+    localStorage.setItem(this.scopedKey("lit-sidebar-open"), "true");
+  }
+
+  /** Channel dropdown on the title while the nav is hidden (webapp parity). */
+  private showChannelTitleMenu(e: MouseEvent): void {
+    const items: MenuItem[] = this.getChannels().map((ch) => ({
+      label: `${this.currentChannel?.id === ch.id ? "✓ " : "  "}# ${ch.name}`,
+      action: () => { void this.openChannel(ch); },
+    }));
+    items.push({ label: "", action: () => {}, type: "separator" });
+    items.push({ label: "Open Folder…", action: () => this.handleOpenFolder() });
+    items.push({ label: "Show navigation", action: () => this.expandSidebar() });
+    showContextMenu(e, items);
   }
 
   toggleSidebar(): void {
@@ -932,7 +973,7 @@ export class ChatPanel {
   }
 
   private saveLocalChannels(): void {
-    localStorage.setItem("lit-desktop-channels", JSON.stringify(this.localChannels));
+    localStorage.setItem(this.scopedKey("lit-desktop-channels"), JSON.stringify(this.localChannels));
   }
 
   // --- Scroll management ---
@@ -1585,6 +1626,13 @@ export class ChatPanel {
       this.currentAgent = this.agents[0];
     }
     if (this.currentAgent) {
+      // The channel had no binding (or a binding to an agent that no longer
+      // exists) — persist the agent we're about to DISPLAY as selected, so the
+      // UI never shows a watcher that isn't really watching. Without this, a
+      // message sent here sits unread forever while the tabs look bound
+      // (bitten live on jovai #general, 2026-07-22: stale bind to a dead
+      // "new-agent" while the UI showed claude selected).
+      setChannelAgent(channelId, this.currentAgent.id, this.scope).catch(() => {});
       await this.loadChannelModelOverride(channelId, this.currentAgent.id);
     }
     this.renderAgentTabs();
@@ -1624,8 +1672,9 @@ export class ChatPanel {
     // Section header with add menu
     const header = document.createElement("div");
     header.className = "section-header";
-    header.innerHTML = `<span class="section-label">Channels</span><button class="icon-btn section-add-btn" title="Open folder">+</button>`;
+    header.innerHTML = `<span class="section-label">Channels</span><button class="icon-btn section-add-btn" title="Open folder">+</button><button class="icon-btn section-hide-btn" title="Hide navigation">&times;</button>`;
     header.querySelector(".section-add-btn")!.addEventListener("click", () => this.handleOpenFolder());
+    header.querySelector(".section-hide-btn")!.addEventListener("click", () => this.collapseSidebar());
     this.channelList.appendChild(header);
 
     for (const ch of channels) {
@@ -1697,7 +1746,7 @@ export class ChatPanel {
 
     this.localChannels = this.localChannels.filter((c) => c.id !== archived.id);
     this.saveLocalChannels();
-    localStorage.removeItem("lit-desktop-channel");
+    localStorage.removeItem(this.scopedKey("lit-desktop-channel"));
     this.currentChannel = null;
     this.channelTitle.textContent = "Welcome";
     this.channelActionsEl.innerHTML = "";
@@ -1729,7 +1778,7 @@ export class ChatPanel {
   async openChannel(channel: Channel): Promise<void> {
     this.currentChannel = channel;
     this.channelTitle.textContent = channel.name;
-    localStorage.setItem("lit-desktop-channel", JSON.stringify({ id: channel.id, name: channel.name }));
+    localStorage.setItem(this.scopedKey("lit-desktop-channel"), JSON.stringify({ id: channel.id, name: channel.name }));
     this.renderChannelHeader();
     // If the terminal is open, re-attach it to the newly-opened channel.
     if (isTerminalOpen()) {
@@ -2242,7 +2291,9 @@ export class ChatPanel {
       // Restore last active channel, or fall back to first
       let target = all[0] || null;
       try {
-        const saved = JSON.parse(localStorage.getItem("lit-desktop-channel") || "");
+        const rawSaved = localStorage.getItem(this.scopedKey("lit-desktop-channel"))
+          ?? (this.scope.connection.id === "local" ? localStorage.getItem("lit-desktop-channel") : null);
+        const saved = JSON.parse(rawSaved || "");
         if (saved?.id) {
           const match = all.find((c) => c.id === saved.id);
           if (match) target = match;

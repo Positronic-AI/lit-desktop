@@ -244,6 +244,21 @@ body {
   color: var(--text-muted);
 }
 
+/* Hidden-nav mode: the channel title becomes the channel selector. */
+.channel-title.channel-title-menu {
+  cursor: pointer;
+}
+
+.channel-title.channel-title-menu::after {
+  content: " \25BE";
+  color: var(--text-muted);
+  font-size: 0.75em;
+}
+
+.section-hide-btn {
+  color: var(--text-muted);
+}
+
 /* Server chip — head of the teams rail; which host these teams belong to.
    Only rendered once a second connection exists. */
 .server-chip {

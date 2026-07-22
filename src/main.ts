@@ -35,20 +35,88 @@ import "dockview-core/dist/styles/dockview.css";
 const wm = new WindowManager();
 const DOCK_LAYOUT_KEY = "lit-desktop-dock-layout";
 
-// The chat view, componentized (stage 2b-i): all chat state and behavior live on
-// this instance. It owns the app-active scope; a future multi-tab UI constructs
-// more of these with other scopes.
-export const chatPanel = new ChatPanel(activeScope());
+// All live chat panels by dockview panel id, plus which one the user last
+// touched. Shell surfaces (search, calendar, terminal, palette, shortcuts) act
+// on the focused panel, so they follow you between places. There is no special
+// primary panel — every chat view is a place tab; setupDock guarantees at
+// least one exists before anything calls activeChat().
+const chatPanels = new Map<string, ChatPanel>();
+let focusedChat: ChatPanel | null = null;
+// Gates mount-time data loads: tabs created before the backend is up are
+// loaded by init()'s loadInitialData() instead, so boot doesn't flash errors.
+let bootComplete = false;
 
-// The chat panel clones the #chat-panel-template DOM into the panel host on
-// first mount and re-attaches the same subtree on later mounts, so element
-// refs/handlers inside the panel survive.
-registerPanel("chat", () => ({
-  mount(host: HTMLElement) {
-    chatPanel.mount(host);
-  },
-  // Persistent panel — never disposed.
-}));
+function activeChat(): ChatPanel {
+  if (focusedChat) return focusedChat;
+  const first = chatPanels.values().next();
+  if (first.done) throw new Error("no chat panel mounted");
+  return first.value;
+}
+
+/** Hooks every chat panel needs into app-level surfaces. */
+function wireChatHooks(p: ChatPanel): void {
+  p.onOpenSearch = openSearch;
+  p.onToggleTerminal = toggleTerminalPanel;
+  p.onReload = () => loadInitialData();
+  p.onImageClick = openLightbox;
+}
+
+// A chat tab: its own ChatPanel standing in (connectionId, team) — possibly a
+// different team on a different server than its neighbors. Params persist in
+// the dockview layout, so tabs restore across restarts; missing params (the
+// legacy "chat" anchor panel) or a since-removed connection fall back to the
+// active scope.
+function chatPanelMount(fixedId?: string) {
+  let p: ChatPanel | null = null;
+  let panelId = "";
+  return {
+    mount(host: HTMLElement, params: Record<string, any>) {
+      panelId = fixedId ?? String(params.id || `chat:${params.connectionId}:${params.team}`);
+      const conn = params.connectionId
+        ? getConnections().find((c) => c.id === params.connectionId)
+        : undefined;
+      const scope = conn
+        ? { connection: conn, team: String(params.team || "local") }
+        : activeScope();
+      p = new ChatPanel(scope);
+      wireChatHooks(p);
+      chatPanels.set(panelId, p);
+      if (!focusedChat) focusedChat = p;
+      p.mount(host);
+      host.addEventListener("pointerdown", () => { if (p) focusedChat = p; }, true);
+      if (bootComplete) void p.loadInitialData();
+    },
+    dispose() {
+      p?.dispose();
+      chatPanels.delete(panelId);
+      if (p && focusedChat === p) focusedChat = null;
+      p = null;
+    },
+  };
+}
+
+registerPanel("chat", () => chatPanelMount("chat")); // legacy saved layouts
+registerPanel("chat-tab", () => chatPanelMount());
+
+/** Focus-or-open a chat tab standing in (connectionId, team). One tab per
+ *  place via the panel id (focus-or-open); open the same place twice via the
+ *  palette? The existing tab focuses — side-by-side same-team views can still
+ *  be arranged by dragging a second place's tab next to it. */
+function openChatTab(connectionId: string, team: string): void {
+  const id = `chat:${connectionId}:${team}`;
+  if (!wm.hasPanel(id)) {
+    const conn = getConnections().find((c) => c.id === connectionId);
+    const server = !conn || conn.id === "local" ? "⌂" : conn.name;
+    wm.addPanel({
+      id,
+      component: "chat-tab",
+      title: `${team} · ${server}`,
+      persistent: true,
+      params: { id, connectionId, team },
+    });
+  }
+  wm.focusPanel(id);
+}
 
 // The viewer panel renders a file's text beside the chat — markdown rendered,
 // other files syntax-highlighted in a code block. The first "see my work next to
@@ -86,7 +154,7 @@ registerPanel("app", () => ({
     }
     const iframe = document.createElement("iframe");
     iframe.className = "app-panel-iframe";
-    iframe.src = url.startsWith("http") ? url : `${chatPanel.scope.connection.url}${url}`;
+    iframe.src = url.startsWith("http") ? url : `${activeChat().scope.connection.url}${url}`;
     host.appendChild(iframe);
   },
 }));
@@ -94,7 +162,7 @@ registerPanel("app", () => ({
 /** Open (or focus) a team app in its own panel. */
 function openApp(app: AppWidget): void {
   if (app.type !== "iframe" || !app.url) {
-    chatPanel.renderMessage({ role: "system", content: `"${app.title}" isn't a supported app type in the desktop yet.` });
+    activeChat().renderMessage({ role: "system", content: `"${app.title}" isn't a supported app type in the desktop yet.` });
     return;
   }
   const id = `app-${app.id}`;
@@ -133,11 +201,12 @@ registerPanel("search", () => {
         tabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
         bodies.forEach((b) => (b.hidden = b.dataset.body !== name));
         if (name === "calendar" && !calendarLoaded) { calendarLoaded = true; mountCalendarView(bodyFor("calendar")); }
-        if (name === "graph" && !graphLoaded && chatPanel.currentChannel) {
+        if (name === "graph" && !graphLoaded && activeChat().currentChannel) {
+          const cp = activeChat();
           graphLoaded = true;
           graphDispose = mountGraphView(bodyFor("graph"), {
-            channelId: chatPanel.currentChannel.id,
-            jumpToMessage: (id?: string) => { void chatPanel.jumpToMessage(id); },
+            channelId: cp.currentChannel!.id,
+            jumpToMessage: (id?: string) => { void cp.jumpToMessage(id); },
             escapeHtml,
           });
         }
@@ -162,11 +231,12 @@ registerPanel("search", () => {
         const q = input.value.trim();
         list.innerHTML = "";
         if (!q) { status.textContent = ""; return; }
-        const channel = chatPanel.currentChannel;
+        const cp = activeChat();
+        const channel = cp.currentChannel;
         if (!channel) { status.textContent = "Open a channel to search."; return; }
         status.textContent = "Searching…";
         try {
-          const results = await searchChannelMessages(channel.id, q, regexCb.checked, chatPanel.scope);
+          const results = await searchChannelMessages(channel.id, q, regexCb.checked, cp.scope);
           status.textContent = results.length
             ? `${results.length} result${results.length === 1 ? "" : "s"}`
             : "No matches";
@@ -177,7 +247,7 @@ registerPanel("search", () => {
             row.innerHTML =
               `<div class="search-result-date">${escapeHtml(date)}</div>` +
               `<div class="search-result-excerpt">${highlightMatch(escapeHtml(r.excerpt), q, regexCb.checked)}</div>`;
-            row.addEventListener("click", () => { void chatPanel.jumpToMessage(r.message_id); });
+            row.addEventListener("click", () => { void cp.jumpToMessage(r.message_id); });
             list.appendChild(row);
           }
         } catch {
@@ -200,7 +270,8 @@ registerPanel("search", () => {
 /** Calendar view: a month heatmap of activity; click a day to list its messages,
  *  click a message to jump to it (reuses the seekable-timeline jump). */
 function mountCalendarView(host: HTMLElement): void {
-  const channel = chatPanel.currentChannel;
+  const cp = activeChat();
+  const channel = cp.currentChannel;
   if (!channel) { host.innerHTML = `<div class="search-placeholder">Open a channel first.</div>`; return; }
   const channelId = channel.id;
   // Two views (master-detail): the picker (month → hour grid) and the results
@@ -258,14 +329,14 @@ function mountCalendarView(host: HTMLElement): void {
         `<div class="cal-msg-preview" data-preview></div></div>`;
     }).join("") || `<div class="search-status">No messages.</div>`;
     listEl.querySelectorAll(".cal-msg").forEach((r) =>
-      r.addEventListener("click", () => { void chatPanel.jumpToMessage((r as HTMLElement).dataset.id); }));
+      r.addEventListener("click", () => { void cp.jumpToMessage((r as HTMLElement).dataset.id); }));
     dayObserver = new IntersectionObserver((entries) => {
       for (const e of entries) {
         if (!e.isIntersecting) continue;
         const el = e.target as HTMLElement;
         dayObserver!.unobserve(el);
         const pv = el.querySelector("[data-preview]") as HTMLElement;
-        fetchMessageContent(el.dataset.ref!, chatPanel.scope).then((raw) => { if (raw) pv.textContent = messagePreview(raw); }).catch(() => {});
+        fetchMessageContent(el.dataset.ref!, cp.scope).then((raw) => { if (raw) pv.textContent = messagePreview(raw); }).catch(() => {});
       }
     }, { root: listEl, rootMargin: "150px" });
     listEl.querySelectorAll(".cal-msg").forEach((el) => dayObserver!.observe(el));
@@ -307,7 +378,7 @@ function mountCalendarView(host: HTMLElement): void {
     selectedDate = date;
     gridEl.querySelectorAll(".cal-cell").forEach((c) => c.classList.toggle("selected", (c as HTMLElement).dataset.date === date));
     hoursWrap.innerHTML = `<div class="search-status">Loading…</div>`;
-    try { dayMessages = await fetchCalendarDay(channelId, date, chatPanel.scope); }
+    try { dayMessages = await fetchCalendarDay(channelId, date, cp.scope); }
     catch { hoursWrap.innerHTML = `<div class="search-status">Failed to load day.</div>`; return; }
     renderHours();
   };
@@ -335,7 +406,7 @@ function mountCalendarView(host: HTMLElement): void {
   host.querySelector(".cal-prev")!.addEventListener("click", () => { view = new Date(view.getFullYear(), view.getMonth() - 1, 1); renderGrid(); });
   host.querySelector(".cal-next")!.addEventListener("click", () => { view = new Date(view.getFullYear(), view.getMonth() + 1, 1); renderGrid(); });
 
-  fetchCalendarDates(channelId, chatPanel.scope).then((d) => {
+  fetchCalendarDates(channelId, cp.scope).then((d) => {
     dates = d;
     const keys = Object.keys(dates).sort();
     if (keys.length) {
@@ -391,9 +462,29 @@ function setupDock(): void {
   // Restore a saved layout; otherwise open the chat panel fresh. Always guarantee
   // the chat panel exists (it's the shell's anchor).
   const restored = wm.restore();
-  if (!restored || !wm.hasPanel("chat")) {
-    wm.addPanel({ id: "chat", component: "chat", title: "Chat", persistent: true });
+  // Legacy-anchor cleanup: older layouts carried a scope-less "Chat" panel.
+  // Once real place tabs exist it's a redundant third view — drop it so a
+  // restart doesn't grow an extra tab. Alone, it stays (it IS the place tab).
+  if (restored && wm.hasPanel("chat") && [...chatPanels.keys()].some((id) => id !== "chat")) {
+    wm.removePanel("chat");
+  } else if (wm.hasPanel("chat")) {
+    // A surviving legacy anchor IS the active place's tab — title it as one
+    // (no view without a visible address).
+    const s = activeScope();
+    const panel = wm.api?.getPanel("chat") as any;
+    panel?.setTitle?.(`${s.team} · ${s.connection.id === "local" ? "⌂" : s.connection.name}`);
   }
+  // Fresh boot (no layout): one tab standing in the active place.
+  if (chatPanels.size === 0) {
+    const s = activeScope();
+    openChatTab(s.connection.id, s.team);
+  }
+  // Focus follows the active dockview panel when it's a chat panel; panels that
+  // aren't chat (search, viewer, apps) leave the last chat focus in place.
+  wm.api?.onDidActivePanelChange((e) => {
+    const p = e?.id ? chatPanels.get(e.id) : undefined;
+    if (p) focusedChat = p;
+  });
 }
 
 // The app-level toolbar. A favorites rail (commands pinned from the F1 palette)
@@ -575,6 +666,26 @@ async function startBackend(): Promise<boolean> {
 // persists in localStorage.
 
 let teams: TeamInfo[] = [];
+
+// Team lists per connection — the catalog of PLACES you can open a chat tab
+// into (or star). The active connection's list comes from the teams rail; the
+// others load lazily in loadInitialData (signed-in/no-auth connections only).
+const teamsByConn = new Map<string, TeamInfo[]>();
+
+function refreshPlaceCatalog(): void {
+  for (const c of getConnections()) {
+    if (c.auth === "keycloak" && !c.refreshToken) continue; // not signed in
+    fetchTeams({ connection: c, team: "local" })
+      .then((list) => {
+        teamsByConn.set(c.id, list);
+        // Pinned place shortcuts resolve against the command list — re-render
+        // the rail now that this connection's places exist, or boot-time pins
+        // silently drop until the next manual re-star.
+        renderToolbarFavorites();
+      })
+      .catch(() => { /* unreachable place — keep any previous list */ });
+  }
+}
 
 async function renderTeamsRail(): Promise<void> {
   const host = document.getElementById("toolbar-teams");
@@ -760,16 +871,17 @@ function setTerminalOpen(open: boolean) {
   // the terminal a dockable panel of its own, so it can sit beside chat.
   const dock = document.getElementById("dockview-container");
   if (!panel || !host) return;
-  if (open && chatPanel.currentChannel) {
+  const cp = activeChat();
+  if (open && cp.currentChannel) {
     if (dock) dock.style.display = "none";
     panel.style.display = "flex";
-    chatPanel.setTerminalButtonActive(true);
-    openTerminal(host, chatPanel.currentChannel.id);
+    cp.setTerminalButtonActive(true);
+    openTerminal(host, cp.currentChannel.id);
     setTimeout(fitToGrid, 60);
   } else {
     panel.style.display = "none";
     if (dock) dock.style.display = "";
-    chatPanel.setTerminalButtonActive(false);
+    cp.setTerminalButtonActive(false);
     closeTerminal();
   }
 }
@@ -802,14 +914,6 @@ async function init() {
   setupDock();
   setupAppToolbar();
 
-  // Cross-panel hooks: the chat header's search/terminal buttons and message
-  // images act on app-level surfaces (search dock panel, terminal overlay,
-  // lightbox); a reload re-runs the full app data load (teams rail + apps + chat).
-  chatPanel.onOpenSearch = openSearch;
-  chatPanel.onToggleTerminal = toggleTerminalPanel;
-  chatPanel.onReload = () => loadInitialData();
-  chatPanel.onImageClick = openLightbox;
-
   const settingsBtn = document.getElementById("settings-btn-global");
   if (settingsBtn) settingsBtn.addEventListener("click", () => openSettings(() => loadInitialData()));
 
@@ -817,16 +921,16 @@ async function init() {
   if (terminalClose) terminalClose.addEventListener("click", () => setTerminalOpen(false));
   window.addEventListener("resize", () => { if (isTerminalOpen()) fitToGrid(); });
 
-  chatPanel.renderMessage({
+  activeChat().renderMessage({
     role: "system",
     content: "Starting LIT backend...",
   });
   const connected = await startBackend();
   if (!connected) {
     setStatus("disconnected");
-    chatPanel.clearMessages();
+    activeChat().clearMessages();
     const logPath = await backendLogPath();
-    chatPanel.renderMessage({
+    activeChat().renderMessage({
       role: "system",
       content:
         "**Failed to start the LIT backend.**\n\n" +
@@ -839,7 +943,8 @@ async function init() {
       if (await checkConnection()) {
         clearInterval(retry);
         setStatus("connected");
-        chatPanel.clearMessages();
+        bootComplete = true;
+        activeChat().clearMessages();
         await loadInitialData();
       } else {
         setStatus("disconnected");
@@ -847,9 +952,10 @@ async function init() {
     }, 5000);
     return;
   }
-  chatPanel.clearMessages();
+  activeChat().clearMessages();
 
   setStatus("connected");
+  bootComplete = true;
   await loadInitialData();
 }
 
@@ -857,10 +963,16 @@ async function loadInitialData() {
   // The boot-time render races sidecar startup; re-render now that it's up.
   renderTeamsRail();
   // Team apps for the command palette / app panels (non-critical).
-  fetchApps(chatPanel.scope)
+  fetchApps(activeChat().scope)
     .then((apps) => { appsCache = apps; })
     .catch(() => { appsCache = []; });
-  await chatPanel.loadInitialData();
+  // Place catalog for "Open chat tab: …" commands and starred places.
+  refreshPlaceCatalog();
+  // Every open place tab (re)loads — restored tabs get their first real load
+  // here, after the backend is up.
+  await Promise.all([...chatPanels.values()].map((p) => p.loadInitialData()));
+  // Channel/agent pins resolve against loaded data the same way place pins do.
+  renderToolbarFavorites();
 }
 
 // --- Command palette ---
@@ -875,26 +987,45 @@ interface Command {
 
 function getCommands(): Command[] {
   const cmds: Command[] = [
-    { id: "open-folder", label: "Open Folder", icon: "📂", action: () => chatPanel.handleOpenFolder() },
+    { id: "open-folder", label: "Open Folder", icon: "📂", action: () => activeChat().handleOpenFolder() },
     { id: "open-file", label: "Open File…", icon: "📄", shortcut: "Ctrl+O", action: handleOpenFile },
     { id: "search-channel", label: "Search in Channel…", icon: "🔍", shortcut: "Ctrl+F", action: openSearch },
-    { id: "toggle-sidebar", label: "Toggle Sidebar", icon: "◧", shortcut: "Ctrl+\\", action: () => chatPanel.toggleSidebar() },
+    { id: "toggle-sidebar", label: "Toggle Sidebar", icon: "◧", shortcut: "Ctrl+\\", action: () => activeChat().toggleSidebar() },
     { id: "toggle-theme", label: "Toggle Theme", icon: "☾", action: () => document.getElementById("theme-toggle")?.click() },
-    { id: "scroll-bottom", label: "Scroll to Bottom", icon: "↓", action: () => chatPanel.scrollToBottom() },
+    { id: "scroll-bottom", label: "Scroll to Bottom", icon: "↓", action: () => activeChat().scrollToBottom() },
   ];
 
-  for (const ch of chatPanel.getChannels()) {
-    cmds.push({ id: `ch-${ch.id}`, label: `Switch to #${ch.name}`, icon: "#", action: () => chatPanel.openChannel(ch) });
+  for (const ch of activeChat().getChannels()) {
+    cmds.push({ id: `ch-${ch.id}`, label: `Switch to #${ch.name}`, icon: "#", action: () => activeChat().openChannel(ch) });
   }
 
-  for (const agent of chatPanel.agents) {
-    cmds.push({ id: `agent-${agent.id}`, label: `Select agent: ${agent.name}`, icon: "🤖", action: () => chatPanel.selectAgent(agent) });
+  for (const agent of activeChat().agents) {
+    cmds.push({ id: `agent-${agent.id}`, label: `Select agent: ${agent.name}`, icon: "🤖", action: () => activeChat().selectAgent(agent) });
   }
 
   for (const t of teams) {
     const slug = t.slug || t.name;
     if (slug === getActiveTeam()) continue;
     cmds.push({ id: `team-${slug}`, label: `Switch to team: ${t.name}`, icon: "⊞", action: () => switchTeam(slug) });
+  }
+
+  // Places: open (or focus) a chat tab standing in a (server, team) — any team
+  // on any connected server. Pinning one of these to the toolbar (the palette's
+  // ☆) is exactly "starring a place": the pin becomes a sidebar shortcut whose
+  // click is focus-or-open. Address model made chrome.
+  for (const [connId, list] of teamsByConn) {
+    const conn = getConnections().find((c) => c.id === connId);
+    if (!conn) continue;
+    const server = conn.id === "local" ? "⌂" : conn.name;
+    for (const t of list) {
+      const slug = t.slug || t.name;
+      cmds.push({
+        id: `place-${connId}-${slug}`,
+        label: `Open chat tab: ${t.name} · ${server}`,
+        icon: (t.name || "?")[0].toUpperCase(),
+        action: () => openChatTab(connId, slug),
+      });
+    }
   }
 
   for (const app of appsCache) {
@@ -1009,7 +1140,7 @@ document.addEventListener("keydown", (e) => {
   }
   if ((e.ctrlKey || e.metaKey) && e.key === "\\") {
     e.preventDefault();
-    chatPanel.toggleSidebar();
+    activeChat().toggleSidebar();
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
     e.preventDefault();
