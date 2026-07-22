@@ -29,7 +29,6 @@ import {
   fetchUsage,
   cancelStream,
   uploadImage,
-  getServer,
   readServerFile,
   searchChannelMessages,
   fetchTeams,
@@ -40,6 +39,8 @@ import {
   getConnections,
   getActiveConnection,
   setActiveConnectionId,
+  activeScope,
+  type Scope,
   type TeamInfo,
   type Agent,
   type Channel,
@@ -113,7 +114,7 @@ registerPanel("app", () => ({
     }
     const iframe = document.createElement("iframe");
     iframe.className = "app-panel-iframe";
-    iframe.src = url.startsWith("http") ? url : `${getServer().url}${url}`;
+    iframe.src = url.startsWith("http") ? url : `${chatScope.connection.url}${url}`;
     host.appendChild(iframe);
   },
 }));
@@ -192,7 +193,7 @@ registerPanel("search", () => {
         if (!currentChannel) { status.textContent = "Open a channel to search."; return; }
         status.textContent = "Searching…";
         try {
-          const results = await searchChannelMessages(currentChannel.id, q, regexCb.checked);
+          const results = await searchChannelMessages(currentChannel.id, q, regexCb.checked, chatScope);
           status.textContent = results.length
             ? `${results.length} result${results.length === 1 ? "" : "s"}`
             : "No matches";
@@ -290,7 +291,7 @@ function mountCalendarView(host: HTMLElement): void {
         const el = e.target as HTMLElement;
         dayObserver!.unobserve(el);
         const pv = el.querySelector("[data-preview]") as HTMLElement;
-        fetchMessageContent(el.dataset.ref!).then((raw) => { if (raw) pv.textContent = messagePreview(raw); }).catch(() => {});
+        fetchMessageContent(el.dataset.ref!, chatScope).then((raw) => { if (raw) pv.textContent = messagePreview(raw); }).catch(() => {});
       }
     }, { root: listEl, rootMargin: "150px" });
     listEl.querySelectorAll(".cal-msg").forEach((el) => dayObserver!.observe(el));
@@ -332,7 +333,7 @@ function mountCalendarView(host: HTMLElement): void {
     selectedDate = date;
     gridEl.querySelectorAll(".cal-cell").forEach((c) => c.classList.toggle("selected", (c as HTMLElement).dataset.date === date));
     hoursWrap.innerHTML = `<div class="search-status">Loading…</div>`;
-    try { dayMessages = await fetchCalendarDay(channelId, date); }
+    try { dayMessages = await fetchCalendarDay(channelId, date, chatScope); }
     catch { hoursWrap.innerHTML = `<div class="search-status">Failed to load day.</div>`; return; }
     renderHours();
   };
@@ -360,7 +361,7 @@ function mountCalendarView(host: HTMLElement): void {
   host.querySelector(".cal-prev")!.addEventListener("click", () => { view = new Date(view.getFullYear(), view.getMonth() - 1, 1); renderGrid(); });
   host.querySelector(".cal-next")!.addEventListener("click", () => { view = new Date(view.getFullYear(), view.getMonth() + 1, 1); renderGrid(); });
 
-  fetchCalendarDates(channelId).then((d) => {
+  fetchCalendarDates(channelId, chatScope).then((d) => {
     dates = d;
     const keys = Object.keys(dates).sort();
     if (keys.length) {
@@ -390,7 +391,7 @@ async function jumpToMessage(id?: string): Promise<void> {
 
   if (!el) {
     try {
-      const { messages, hasNewer } = await fetchMessagesAround(currentChannel.id, id, 50);
+      const { messages, hasNewer } = await fetchMessagesAround(currentChannel.id, id, 50, chatScope);
       if (messages.length) {
         clearMessages();
         if (hasNewer) renderHistoryBanner(currentChannel);
@@ -670,6 +671,11 @@ const sidebarExpandBtn = document.getElementById("sidebar-expand-btn") as HTMLBu
 const cancelStreamBtn = document.getElementById("cancel-stream-btn") as HTMLButtonElement;
 const inputResizeHandle = document.getElementById("input-resize-handle") as HTMLDivElement;
 const inputArea = document.getElementById("input-area") as HTMLDivElement;
+
+// The chat view's scope — which (server, team) this view stands in. Stage 2a of
+// componentization: every chat API call threads this explicitly, so the future
+// per-tab ChatPanel just owns one of these instead of the module owning one.
+let chatScope: Scope = activeScope();
 
 let currentChannel: Channel | null = null;
 let currentAgent: Agent | null = null;
@@ -1989,7 +1995,7 @@ function positionMenuNear(menu: HTMLElement, event: MouseEvent) {
 
 async function changeEffort(agent: Agent, effort: string) {
   try {
-    await updateAgent(agent.id, { effort: effort || null } as Partial<Agent>);
+    await updateAgent(agent.id, { effort: effort || null } as Partial<Agent>, chatScope);
     agent.effort = effort || null;
     renderAgentInfo();
   } catch (err) {
@@ -2010,23 +2016,23 @@ async function applyThrottle(agent: Agent, state: ThrottleState) {
   const prev = agentThrottles[agent.id] || "disabled";
   try {
     // Tear down previous state
-    if (prev === "stopped") await clearInterrupt(agent.id);
-    if (prev === "safe") await setSafeMode(agent.id, false);
+    if (prev === "stopped") await clearInterrupt(agent.id, chatScope);
+    if (prev === "safe") await setSafeMode(agent.id, false, chatScope);
 
     // Enable/disable transitions
     const wasEnabled = prev !== "disabled";
     const willEnable = state !== "disabled";
     if (!wasEnabled && willEnable) {
-      await setHeartbeatEnabled(agent.id, true);
+      await setHeartbeatEnabled(agent.id, true, chatScope);
       agent.heartbeat_enabled = true;
     } else if (wasEnabled && !willEnable) {
-      await setHeartbeatEnabled(agent.id, false);
+      await setHeartbeatEnabled(agent.id, false, chatScope);
       agent.heartbeat_enabled = false;
     }
 
     // Set up new state
-    if (state === "safe") await setSafeMode(agent.id, true);
-    if (state === "stopped") await setInterrupt(agent.id, "User paused from desktop app");
+    if (state === "safe") await setSafeMode(agent.id, true, chatScope);
+    if (state === "stopped") await setInterrupt(agent.id, "User paused from desktop app", chatScope);
 
     agentThrottles[agent.id] = state;
   } catch (err) {
@@ -2043,10 +2049,10 @@ async function changeModel(agent: Agent, model: string) {
   try {
     if (currentChannel) {
       const clearing = model === agent.model;
-      await setChannelModelOverride(currentChannel.id, agent.id, clearing ? "" : model);
+      await setChannelModelOverride(currentChannel.id, agent.id, clearing ? "" : model, chatScope);
       channelModelOverride = clearing ? null : model;
     } else {
-      await updateAgent(agent.id, { model });
+      await updateAgent(agent.id, { model }, chatScope);
       agent.model = model;
     }
     renderAgentInfo();
@@ -2057,7 +2063,7 @@ async function changeModel(agent: Agent, model: string) {
 
 async function loadChannelModelOverride(channelId: string, agentId: string) {
   try {
-    channelModelOverride = await getChannelModelOverride(channelId, agentId);
+    channelModelOverride = await getChannelModelOverride(channelId, agentId, chatScope);
   } catch {
     channelModelOverride = null;
   }
@@ -2070,8 +2076,8 @@ async function loadAgentThrottle(agent: Agent) {
   }
   try {
     const [safeResp, intResp] = await Promise.all([
-      getSafeMode(agent.id),
-      getInterrupt(agent.id),
+      getSafeMode(agent.id, chatScope),
+      getInterrupt(agent.id, chatScope),
     ]);
     const safe = safeResp?.safe_mode ?? false;
     const interrupted = intResp?.interrupt_requested ?? false;
@@ -2088,7 +2094,7 @@ async function selectAgent(agent: Agent) {
 
   if (currentChannel) {
     try {
-      await setChannelAgent(currentChannel.id, agent.id);
+      await setChannelAgent(currentChannel.id, agent.id, chatScope);
     } catch {
       // Non-critical
     }
@@ -2104,7 +2110,7 @@ async function selectAgent(agent: Agent) {
 async function loadChannelAgent(channelId: string) {
   channelModelOverride = null;
   try {
-    const config = await getChannelConfig(channelId);
+    const config = await getChannelConfig(channelId, chatScope);
     const agentId = config.agent_id as string | null;
     if (agentId) {
       const agent = agents.find((a) => a.id === agentId);
@@ -2139,7 +2145,7 @@ async function handleOpenFolder() {
 
   const folderPath = typeof selected === "string" ? selected : selected;
   try {
-    const result = await openFolder(folderPath);
+    const result = await openFolder(folderPath, undefined, chatScope);
     const newChannel: Channel = {
       id: result.id || result.name,
       name: result.name,
@@ -2149,7 +2155,7 @@ async function handleOpenFolder() {
       localChannels.push(newChannel);
       saveLocalChannels();
     }
-    renderSidebar(mergeChannels(localChannels, await fetchChannels()));
+    renderSidebar(mergeChannels(localChannels, await fetchChannels(chatScope)));
     await openChannel(newChannel);
   } catch (err) {
     renderMessage({ role: "system", content: `Failed to open folder: ${err}` });
@@ -2228,10 +2234,10 @@ async function archiveCurrentChannel() {
   // drops from navigation). Await it before refreshing, or the refresh races the
   // archive and the channel reappears.
   try {
-    await fetch(`${getServer().url}/mux/channels/${archived.id}`, {
+    await fetch(`${chatScope.connection.url}/mux/channels/${archived.id}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ team: getActiveTeam() }),
+      headers: { "Content-Type": "application/json", ...authHeaders(chatScope.connection) },
+      body: JSON.stringify({ team: chatScope.team }),
     });
   } catch { /* offline / already gone */ }
 
@@ -2286,7 +2292,7 @@ async function openChannel(channel: Channel) {
   await loadChannelAgent(channel.id);
 
   try {
-    const messages = await fetchChannelMessages(channel.id);
+    const messages = await fetchChannelMessages(channel.id, 50, chatScope);
 
     if (messages.length === 0) {
       renderMessage({ role: "system", content: "No messages yet. Type something to start the conversation." });
@@ -2306,7 +2312,7 @@ async function openChannel(channel: Channel) {
     }
 
     // Non-fatal: a mark-read failure must not masquerade as a load failure.
-    markChannelRead(channel.id).catch(() => {});
+    markChannelRead(channel.id, chatScope).catch(() => {});
     connectWebSocket(channel.id);
   } catch (err) {
     renderMessage({ role: "system", content: `Failed to load messages: ${err}` });
@@ -2319,7 +2325,7 @@ async function openChannel(channel: Channel) {
 // --- WebSocket ---
 
 function connectWebSocket(channelId: string) {
-  channelWs = createChannelWebSocket(channelId);
+  channelWs = createChannelWebSocket(channelId, chatScope);
 
   channelWs.onopen = () => {
     wsReconnectAttempt = 0;
@@ -2356,7 +2362,7 @@ function connectWebSocket(channelId: string) {
           });
         }
         if (added && document.visibilityState === "visible") {
-          markChannelRead(channelId).catch(() => {});
+          markChannelRead(channelId, chatScope).catch(() => {});
         }
       } else if (data.id && data.content && data.direction) {
         if (!knownMessageIds.has(data.id)) {
@@ -2376,7 +2382,7 @@ function connectWebSocket(channelId: string) {
             }
           }
           if (document.visibilityState === "visible") {
-            markChannelRead(channelId).catch(() => {});
+            markChannelRead(channelId, chatScope).catch(() => {});
           }
         }
       } else if (data.type === "thinking") {
@@ -2454,7 +2460,7 @@ function showConnectionStatus(status: "connected" | "reconnecting") {
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && currentChannel) {
-    markChannelRead(currentChannel.id).catch(() => {});
+    markChannelRead(currentChannel.id, chatScope).catch(() => {});
     if (channelWs?.readyState !== WebSocket.OPEN) {
       connectWebSocket(currentChannel.id);
     }
@@ -2570,9 +2576,9 @@ function removeTypingIndicator() {
 
 async function deleteMessage(channelId: string, messageId: string, el: HTMLElement) {
   try {
-    await fetch(`${getServer().url}/mux/channels/${channelId}/messages/${messageId}`, {
+    await fetch(`${chatScope.connection.url}/mux/channels/${channelId}/messages/${messageId}`, {
       method: "DELETE",
-      headers: authHeaders(),
+      headers: authHeaders(chatScope.connection),
     });
     el.remove();
     knownMessageIds.delete(messageId);
@@ -2686,7 +2692,7 @@ async function handleSend() {
     const imageNames: string[] = [];
     for (const file of files) {
       try {
-        const result = await uploadImage(file, currentChannel.id);
+        const result = await uploadImage(file, currentChannel.id, chatScope);
         imageMarkdowns.push(`![Pasted image](${result.url})`);
         imageNames.push(result.filename);
       } catch (err) {
@@ -2708,7 +2714,7 @@ async function handleSend() {
   }
 
   try {
-    await postChannelMessage(currentChannel.id, content);
+    await postChannelMessage(currentChannel.id, content, chatScope);
   } catch (err) {
     renderMessage({ role: "system", content: `Failed to send: ${err}` });
   }
@@ -2718,7 +2724,7 @@ async function handleSend() {
 
 async function refreshSidebar() {
   try {
-    const remote = await fetchChannels();
+    const remote = await fetchChannels(chatScope);
     channelListCache = remote;
     renderSidebar(mergeChannels(localChannels, remote));
   } catch {
@@ -2728,7 +2734,7 @@ async function refreshSidebar() {
 
 async function refreshAgents() {
   try {
-    agents = await fetchAgents();
+    agents = await fetchAgents(chatScope);
     // Refresh throttle state for current agent
     if (currentAgent) {
       await loadAgentThrottle(currentAgent);
@@ -2736,7 +2742,7 @@ async function refreshAgents() {
     // Refresh usage for current agent's backend
     if (currentAgent) {
       try {
-        usageReports[currentAgent.backend] = await fetchUsage(currentAgent.backend);
+        usageReports[currentAgent.backend] = await fetchUsage(currentAgent.backend, chatScope);
       } catch { /* non-critical */ }
     }
     renderAgentTabs();
@@ -2832,10 +2838,10 @@ async function loadInitialData() {
   try {
     // Fetch agents, models, channels, and team apps in parallel
     const [agentsData, modelsData, remote, appsData] = await Promise.all([
-      fetchAgents(),
-      fetchModels().catch(() => ({})),
-      fetchChannels(),
-      fetchApps().catch(() => []),
+      fetchAgents(chatScope),
+      fetchModels(chatScope).catch(() => ({})),
+      fetchChannels(chatScope),
+      fetchApps(chatScope).catch(() => []),
     ]);
 
     agents = agentsData;
@@ -2852,7 +2858,7 @@ async function loadInitialData() {
       await Promise.all(
         backends.map(async (b) => {
           try {
-            usageReports[b] = await fetchUsage(b);
+            usageReports[b] = await fetchUsage(b, chatScope);
           } catch {
             // Usage may not be available for all backends
           }
@@ -3047,7 +3053,7 @@ sendBtn.addEventListener("click", handleSend);
 cancelStreamBtn.addEventListener("click", async () => {
   if (activeStreamId) {
     try {
-      await cancelStream(activeStreamId);
+      await cancelStream(activeStreamId, chatScope);
     } catch { /* non-critical */ }
     activeStreamId = null;
     cancelStreamBtn.style.display = "none";
