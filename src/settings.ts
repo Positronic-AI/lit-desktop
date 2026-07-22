@@ -7,8 +7,11 @@ import {
   startOAuth, oauthStatus, submitOAuthCode, cancelOAuth,
   fetchModelsWithConstraints, fetchFullAgents, getAgent, saveAgent, deleteAgent,
   fetchDefaultPrompt, getServer, getActiveTeam,
+  getConnections, saveConnection, removeConnection,
+  getActiveConnection, setActiveConnectionId,
+  startDeviceAuth, pollDeviceToken, signedInUser,
   type Credential, type Vendor, type CredMode, type FullAgent,
-  type BackendModel,
+  type BackendModel, type Connection,
 } from "./api";
 
 interface VendorMeta {
@@ -157,9 +160,130 @@ function renderSetup(): void {
   toolsRoot.appendChild(buildToolsFrame());
   toolsSection.appendChild(toolsRoot);
 
-  bodyEl.append(connSection, agentSection, toolsSection);
+  const serversSection = el("div", "setup-section");
+  serversSection.appendChild(el("h3", "setup-section-title", "Servers"));
+  serversRoot = el("div", "setup-section-body");
+  serversSection.appendChild(serversRoot);
+
+  bodyEl.append(connSection, agentSection, toolsSection, serversSection);
   renderConnections();
   renderAgents();
+  renderServers();
+}
+
+// ---- Servers (connections to LIT hosts) ----
+// A connection makes a remote host's teams/channels/agents reachable — the
+// desktop stays a client; agents run on the host you're connected to
+// (docs/plans/address-model.md). Local is always present and needs no auth.
+
+let serversRoot: HTMLElement;
+
+function renderServers(): void {
+  serversRoot.innerHTML = "";
+  const active = getActiveConnection();
+
+  for (const c of getConnections()) {
+    const row = el("div", "cred-detail-line");
+    const label = el("span", undefined, `${c.name} `);
+    (label as HTMLElement).style.fontWeight = "600";
+    const url = el("span", "settings-empty", c.url);
+    row.append(label, url);
+
+    if (c.auth === "keycloak") {
+      const user = signedInUser(c);
+      if (c.refreshToken && user) {
+        row.appendChild(el("span", "settings-link", ` · ${user}`));
+      } else {
+        const signIn = el("button", "settings-mini-btn", "Sign in") as HTMLButtonElement;
+        signIn.addEventListener("click", () => deviceSignIn(c, row, signIn));
+        row.appendChild(signIn);
+      }
+    }
+    if (c.id === active.id) {
+      row.appendChild(el("span", "settings-link", " · connected"));
+    } else {
+      const use = el("button", "settings-mini-btn", "Connect") as HTMLButtonElement;
+      use.addEventListener("click", () => {
+        setActiveConnectionId(c.id);
+        // Same precedent as team flips (and VS Code remotes): the whole
+        // workspace scopes to the place — a reload swaps it cleanly.
+        window.location.reload();
+      });
+      row.appendChild(use);
+    }
+    if (c.id !== "local") {
+      const rm = el("button", "settings-mini-btn ghost", "Remove") as HTMLButtonElement;
+      rm.addEventListener("click", () => {
+        removeConnection(c.id);
+        renderServers();
+      });
+      row.appendChild(rm);
+    }
+    serversRoot.appendChild(row);
+  }
+
+  // Add-server form. Auth server + realm are only needed until servers expose
+  // auth discovery; leaving them blank means "no auth" (e.g. a LAN box).
+  const form = el("div", "team-new-row");
+  const nameInput = document.createElement("input");
+  nameInput.className = "settings-input";
+  nameInput.placeholder = "Name (e.g. JovAI)";
+  const urlInput = document.createElement("input");
+  urlInput.className = "settings-input wide";
+  urlInput.placeholder = "https://app.jov.ai";
+  const authInput = document.createElement("input");
+  authInput.className = "settings-input wide";
+  authInput.placeholder = "Auth server (https://auth.lit.ai)";
+  const realmInput = document.createElement("input");
+  realmInput.className = "settings-input";
+  realmInput.placeholder = "Realm (JOV-AI)";
+  const add = el("button", "settings-primary-btn", "Add server") as HTMLButtonElement;
+  add.addEventListener("click", () => {
+    const name = nameInput.value.trim();
+    const rawUrl = urlInput.value.trim().replace(/\/+$/, "");
+    if (!name || !rawUrl) return;
+    const authUrl = authInput.value.trim().replace(/\/+$/, "");
+    const conn: Connection = {
+      id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || `srv-${Date.now()}`,
+      name,
+      url: rawUrl,
+      auth: authUrl ? "keycloak" : "none",
+      authUrl: authUrl || undefined,
+      realm: realmInput.value.trim() || undefined,
+    };
+    saveConnection(conn);
+    nameInput.value = urlInput.value = authInput.value = realmInput.value = "";
+    renderServers();
+  });
+  form.append(nameInput, urlInput, authInput, realmInput, add);
+  serversRoot.appendChild(form);
+}
+
+/** Device-flow sign-in: open the browser to the verification URL, show the
+ *  code, poll until approved. One sign-in lasts the Keycloak SSO session —
+ *  the 5-minute access tokens refresh themselves from then on. */
+async function deviceSignIn(conn: Connection, row: HTMLElement, btn: HTMLButtonElement): Promise<void> {
+  btn.disabled = true;
+  const status = el("span", "settings-empty", " starting…");
+  row.appendChild(status);
+  try {
+    const start = await startDeviceAuth(conn);
+    status.textContent = ` code ${start.user_code} — approve in the browser…`;
+    await openExternal(start.verification_uri_complete);
+    const deadline = Date.now() + start.expires_in * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, Math.max(start.interval, 5) * 1000));
+      if (await pollDeviceToken(conn, start.device_code)) {
+        renderServers();
+        return;
+      }
+    }
+    status.textContent = " sign-in timed out — try again";
+    btn.disabled = false;
+  } catch (e) {
+    status.textContent = ` sign-in failed: ${e instanceof Error ? e.message : e}`;
+    btn.disabled = false;
+  }
 }
 
 /** "Connect your tools" — hosts the team's connector app in an iframe served

@@ -58,28 +58,216 @@ export interface BackendModel {
 
 export type ThrottleState = "disabled" | "enabled" | "safe" | "stopped";
 
-const DEFAULT_SERVER: ServerConfig = {
+// ---- Connections (servers) ----
+// A Connection makes a host's addresses reachable (see docs/plans/address-model.md).
+// "Connection" always means a server connection — frontier-model credentials are
+// "credentials", a different noun. The list is personal chrome: stored locally,
+// never on any server. The Local connection is always present and needs no auth.
+
+export interface Connection {
+  id: string;
+  name: string;      // "Local", "JovAI (jupiter)"
+  url: string;       // http://127.0.0.1:5000, https://app.jov.ai
+  auth: "none" | "keycloak";
+  authUrl?: string;  // https://auth.lit.ai (until servers expose auth discovery)
+  realm?: string;    // JOV-AI
+  // Tokens from the device-flow sign-in. Access tokens live ~5 minutes on our
+  // realms — apiFetch refreshes proactively; the refresh token rides the
+  // Keycloak SSO session (days), so one sign-in lasts as long as the session.
+  token?: string;
+  refreshToken?: string;
+  tokenExpiresAt?: number; // unix seconds
+}
+
+const LOCAL_CONNECTION: Connection = {
+  id: "local",
+  name: "Local",
   // 127.0.0.1, not "localhost": on Windows localhost can resolve to IPv6 ::1
   // first, but the backend binds IPv4 127.0.0.1 only — so localhost fails to
   // connect there. 127.0.0.1 hits the exact bind address on every platform.
   url: "http://127.0.0.1:5000",
-  name: "Local",
+  auth: "none",
 };
 
-let currentServer: ServerConfig = DEFAULT_SERVER;
+const CONNECTIONS_KEY = "lit-connections";
+const ACTIVE_CONNECTION_KEY = "lit-active-connection";
+
+function loadConnections(): Connection[] {
+  try {
+    const raw = localStorage.getItem(CONNECTIONS_KEY);
+    if (raw) {
+      const list = JSON.parse(raw) as Connection[];
+      if (Array.isArray(list)) {
+        // Local is pinned first and can't be removed or drift.
+        return [LOCAL_CONNECTION, ...list.filter((c) => c && c.id !== "local")];
+      }
+    }
+  } catch { /* corrupted store — fall back to just Local */ }
+  return [LOCAL_CONNECTION];
+}
+
+let connections: Connection[] = loadConnections();
+let activeConnectionId = localStorage.getItem(ACTIVE_CONNECTION_KEY) || "local";
+
+function persistConnections(): void {
+  localStorage.setItem(
+    CONNECTIONS_KEY,
+    JSON.stringify(connections.filter((c) => c.id !== "local")),
+  );
+}
+
+export function getConnections(): Connection[] {
+  return connections;
+}
+
+export function getActiveConnection(): Connection {
+  return connections.find((c) => c.id === activeConnectionId) ?? LOCAL_CONNECTION;
+}
+
+/** Add or update a connection (by id) and persist. */
+export function saveConnection(conn: Connection): void {
+  const i = connections.findIndex((c) => c.id === conn.id);
+  if (i >= 0) connections[i] = conn;
+  else connections.push(conn);
+  persistConnections();
+}
+
+/** Remove a connection. Local can't be removed; removing the active one flips to Local. */
+export function removeConnection(id: string): void {
+  if (id === "local") return;
+  connections = connections.filter((c) => c.id !== id);
+  persistConnections();
+  if (activeConnectionId === id) setActiveConnectionId("local");
+}
+
+export function setActiveConnectionId(id: string): void {
+  activeConnectionId = connections.some((c) => c.id === id) ? id : "local";
+  localStorage.setItem(ACTIVE_CONNECTION_KEY, activeConnectionId);
+}
+
+// ---- Sign-in (Keycloak device flow) ----
+// The desktop is a public OAuth client using the Device Authorization Grant:
+// no client secret, no redirect URI, no loopback server — the browser does the
+// login, the app polls for tokens. Client `lit-desktop` is registered per realm.
+
+const DEVICE_CLIENT_ID = "lit-desktop";
+
+export interface DeviceAuthStart {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  expires_in: number;
+  interval: number;
+}
+
+function oidcBase(conn: Connection): string {
+  return `${(conn.authUrl || "").replace(/\/+$/, "")}/realms/${conn.realm}/protocol/openid-connect`;
+}
+
+export async function startDeviceAuth(conn: Connection): Promise<DeviceAuthStart> {
+  const res = await fetch(`${oidcBase(conn)}/auth/device`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: DEVICE_CLIENT_ID, scope: "openid" }),
+  });
+  if (!res.ok) throw new Error(`Device auth failed: ${res.status}`);
+  return res.json();
+}
+
+/** One poll for the device-flow token. Returns true once signed in (tokens are
+ *  stored on the connection), false while the user hasn't approved yet. */
+export async function pollDeviceToken(conn: Connection, deviceCode: string): Promise<boolean> {
+  const res = await fetch(`${oidcBase(conn)}/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      device_code: deviceCode,
+      client_id: DEVICE_CLIENT_ID,
+    }),
+  });
+  const data = await res.json();
+  if (res.ok) {
+    storeTokens(conn, data);
+    return true;
+  }
+  if (data.error === "authorization_pending" || data.error === "slow_down") return false;
+  throw new Error(data.error_description || data.error || `token poll failed: ${res.status}`);
+}
+
+function storeTokens(conn: Connection, data: { access_token: string; refresh_token?: string; expires_in: number }): void {
+  conn.token = data.access_token;
+  if (data.refresh_token) conn.refreshToken = data.refresh_token;
+  conn.tokenExpiresAt = Math.floor(Date.now() / 1000) + (data.expires_in || 300);
+  saveConnection(conn);
+}
+
+/** Who the connection is signed in as, from the access token's claims. */
+export function signedInUser(conn: Connection): string | null {
+  if (!conn.token) return null;
+  try {
+    const payload = JSON.parse(atob(conn.token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    return payload.preferred_username || payload.email || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Refresh the access token if it's missing or expiring within 30s. A dead
+ *  refresh token (SSO session ended) clears auth so the UI shows Sign in again. */
+async function ensureFreshToken(conn: Connection): Promise<void> {
+  if (conn.auth !== "keycloak" || !conn.refreshToken) return;
+  const now = Math.floor(Date.now() / 1000);
+  if (conn.token && conn.tokenExpiresAt && conn.tokenExpiresAt - now > 30) return;
+  const res = await fetch(`${oidcBase(conn)}/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: conn.refreshToken,
+      client_id: DEVICE_CLIENT_ID,
+    }),
+  });
+  if (res.ok) {
+    storeTokens(conn, await res.json());
+  } else if (res.status === 400 || res.status === 401) {
+    conn.token = undefined;
+    conn.refreshToken = undefined;
+    conn.tokenExpiresAt = undefined;
+    saveConnection(conn);
+  }
+}
+
+/** Auth headers for the active connection — for the few call sites that fetch()
+ *  directly (DELETE/cancel endpoints, iframe-adjacent requests) instead of apiFetch. */
+export function authHeaders(): Record<string, string> {
+  const conn = getActiveConnection();
+  return conn.token ? { Authorization: `Bearer ${conn.token}` } : {};
+}
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${currentServer.url}/mux${path}`, options);
+  const conn = getActiveConnection();
+  await ensureFreshToken(conn);
+  const headers = new Headers(options?.headers);
+  if (conn.token) headers.set("Authorization", `Bearer ${conn.token}`);
+  const res = await fetch(`${conn.url}/mux${path}`, { ...options, headers });
+  if (res.status === 401 || res.status === 403) {
+    throw new Error(`AUTH_REQUIRED: ${res.status} from ${conn.name}`);
+  }
   if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`);
   return res.json();
 }
 
 export function getServer(): ServerConfig {
-  return currentServer;
+  const conn = getActiveConnection();
+  return { url: conn.url, name: conn.name };
 }
 
+/** @deprecated Use saveConnection + setActiveConnectionId. Kept for compatibility. */
 export function setServer(config: ServerConfig) {
-  currentServer = config;
+  saveConnection({ id: config.name, name: config.name, url: config.url, auth: "none" });
+  setActiveConnectionId(config.name);
 }
 
 // ---- Teams (workspace separation) ----
@@ -157,6 +345,20 @@ export async function readServerFile(path: string): Promise<string> {
 export async function fetchAgents(): Promise<Agent[]> {
   const data = await apiFetch<{ agents: Agent[] }>(`/agents?team=${activeTeam}`);
   return data.agents;
+}
+
+export interface AppWidget {
+  id: string;
+  title: string;
+  type: string; // "iframe" | "markdown" | "component"
+  url?: string | null;
+}
+
+/** Team apps (published apps, e.g. an iframe widget like the fluid simulation) —
+ *  the same catalog the webapp's team-apps feature draws from. */
+export async function fetchApps(): Promise<AppWidget[]> {
+  const data = await apiFetch<{ data: AppWidget[] }>(`/widgets?team=${activeTeam}`);
+  return data.data || [];
 }
 
 export async function fetchChannels(): Promise<Channel[]> {
@@ -265,9 +467,9 @@ export async function postChannelMessage(
 }
 
 export async function openFolder(folderPath: string, name?: string): Promise<{ id: string; name: string }> {
-  const res = await fetch(`${currentServer.url}/mux/channels/open-folder`, {
+  const res = await fetch(`${getActiveConnection().url}/mux/channels/open-folder`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ folder_path: folderPath, name, team: activeTeam }),
   });
 
@@ -289,15 +491,36 @@ export async function markChannelRead(channelId: string): Promise<void> {
 }
 
 export async function setChannelAgent(channelId: string, agentId: string): Promise<void> {
-  await fetch(`${currentServer.url}/mux/channels/${channelId}/config`, {
+  await fetch(`${getActiveConnection().url}/mux/channels/${channelId}/config`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ agent_id: agentId, team: activeTeam }),
   });
 }
 
 export async function getChannelConfig(channelId: string): Promise<Record<string, unknown>> {
   return apiFetch<Record<string, unknown>>(`/channels/${channelId}/config?team=${activeTeam}`);
+}
+
+/** This channel's per-agent model override, or null if it follows the agent default. */
+export async function getChannelModelOverride(channelId: string, agentId: string): Promise<string | null> {
+  try {
+    const data = await apiFetch<{ model: string | null }>(
+      `/channels/${channelId}/model-override?agent_id=${encodeURIComponent(agentId)}&team=${activeTeam}`,
+    );
+    return data?.model ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Set (empty string clears → revert to agent default) this channel's model for one agent. */
+export async function setChannelModelOverride(channelId: string, agentId: string, model: string): Promise<void> {
+  await apiFetch(`/channels/${channelId}/model-override`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent_id: agentId, model, team: activeTeam }),
+  });
 }
 
 export interface ChannelSearchResult {
@@ -319,8 +542,15 @@ export async function searchChannelMessages(
 }
 
 export function createChannelWebSocket(channelId: string): WebSocket {
-  const wsUrl = currentServer.url.replace(/^http/, "ws");
-  return new WebSocket(`${wsUrl}/mux/ws/channel/${channelId}`);
+  const conn = getActiveConnection();
+  const wsUrl = conn.url.replace(/^http/, "ws");
+  // Token as query param — the same mechanism the webapp client uses against
+  // these endpoints (WS has no headers). Team scoping rides along for remote
+  // hosts, matching the webapp's channel WS URL shape.
+  const params = new URLSearchParams();
+  if (conn.token) params.set("token", conn.token);
+  params.set("team", activeTeam);
+  return new WebSocket(`${wsUrl}/mux/ws/channel/${channelId}?${params.toString()}`);
 }
 
 // --- Agent control APIs ---
@@ -388,9 +618,9 @@ export async function fetchUsage(backendId: string): Promise<UsageReport> {
 }
 
 export async function cancelStream(streamId: string): Promise<void> {
-  await fetch(`${currentServer.url}/mux/streams/${streamId}/cancel`, {
+  await fetch(`${getActiveConnection().url}/mux/streams/${streamId}/cancel`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({}),
   });
 }
@@ -398,12 +628,13 @@ export async function cancelStream(streamId: string): Promise<void> {
 export async function uploadImage(file: File, channelId?: string): Promise<{ url: string; filename: string }> {
   const formData = new FormData();
   formData.append("file", file);
-  let url = `${currentServer.url}/mux/api/upload`;
+  const base = getActiveConnection().url;
+  let url = `${base}/mux/api/upload`;
   if (channelId) url += `?channel_id=${encodeURIComponent(channelId)}`;
-  const res = await fetch(url, { method: "POST", body: formData });
+  const res = await fetch(url, { method: "POST", headers: authHeaders(), body: formData });
   if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
   const data = await res.json();
-  return { url: `${currentServer.url}/mux${data.url}`, filename: data.filename };
+  return { url: `${base}/mux${data.url}`, filename: data.filename };
 }
 
 // --- Credentials / Connections ---

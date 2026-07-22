@@ -14,7 +14,11 @@ import {
   openFolder,
   setChannelAgent,
   getChannelConfig,
+  getChannelModelOverride,
+  setChannelModelOverride,
   fetchModels,
+  fetchApps,
+  type AppWidget,
   updateAgent,
   setHeartbeatEnabled,
   setSafeMode,
@@ -32,6 +36,10 @@ import {
   createTeam,
   getActiveTeam,
   setActiveTeam,
+  authHeaders,
+  getConnections,
+  getActiveConnection,
+  setActiveConnectionId,
   type TeamInfo,
   type Agent,
   type Channel,
@@ -92,6 +100,36 @@ registerPanel("viewer", () => ({
       });
   },
 }));
+
+// A team app (published from /data/{team}/apps or the shared everyone catalog)
+// rendered as an iframe — the desktop's counterpart to the webapp's team-apps
+// grid widget. Only 'iframe' apps render; other types aren't wired up yet.
+registerPanel("app", () => ({
+  mount(host: HTMLElement, params: Record<string, any>) {
+    const url = String(params.url || "");
+    if (!url) {
+      host.textContent = "This app has no URL to open.";
+      return;
+    }
+    const iframe = document.createElement("iframe");
+    iframe.className = "app-panel-iframe";
+    iframe.src = url.startsWith("http") ? url : `${getServer().url}${url}`;
+    host.appendChild(iframe);
+  },
+}));
+
+/** Open (or focus) a team app in its own panel. */
+function openApp(app: AppWidget): void {
+  if (app.type !== "iframe" || !app.url) {
+    renderMessage({ role: "system", content: `"${app.title}" isn't a supported app type in the desktop yet.` });
+    return;
+  }
+  const id = `app-${app.id}`;
+  if (!wm.hasPanel(id)) {
+    wm.addPanel({ id, component: "app", title: app.title, params: { url: app.url } });
+  }
+  wm.focusPanel(id);
+}
 
 // Channel text search — a dock panel with a debounced search box + results.
 // Backed by GET /channels/{id}/messages/search. Clicking a hit that's currently
@@ -635,6 +673,9 @@ const inputArea = document.getElementById("input-area") as HTMLDivElement;
 
 let currentChannel: Channel | null = null;
 let currentAgent: Agent | null = null;
+// Per-(channel, currentAgent) model override — null means "follow the agent's default".
+// Reloaded whenever the open channel or its bound agent changes.
+let channelModelOverride: string | null = null;
 let agents: Agent[] = [];
 let channelWs: WebSocket | null = null;
 let knownMessageIds = new Set<string>();
@@ -668,10 +709,23 @@ async function renderTeamsRail(): Promise<void> {
     teams = await fetchTeams();
   } catch {
     // Sidecar may still be booting — loadInitialData() re-renders once it's up.
+    // For a remote connection this is the sleeping-place state: show the server
+    // chip anyway so the user can flip back to a reachable place.
+    host.innerHTML = "";
+    if (getConnections().length > 1) host.appendChild(buildServerChip(true));
     return;
   }
   host.innerHTML = "";
-  const active = getActiveTeam();
+  // Server chip: which host this rail's teams belong to. Only shown once a
+  // second connection exists — single-server users never see it.
+  if (getConnections().length > 1) host.appendChild(buildServerChip(false));
+  // Cross-host flip: the remembered team may not exist on this host — fall back
+  // to the first team the server offers so channels don't query a ghost namespace.
+  let active = getActiveTeam();
+  if (teams.length && !teams.some((t) => (t.slug || t.name) === active)) {
+    active = teams[0].slug || teams[0].name;
+    setActiveTeam(active);
+  }
   for (const t of teams) {
     const slug = t.slug || t.name;
     const btn = document.createElement("button");
@@ -698,6 +752,63 @@ function switchTeam(slug: string): void {
   // The whole workspace scopes to the team; a reload swaps it cleanly
   // (dockview layout and theme persist in localStorage).
   window.location.reload();
+}
+
+/** The active server's chip at the head of the teams rail. Click → connection
+ *  menu. Flipping connections reloads, same as flipping teams (VS Code reloads
+ *  the window on remote connect — same precedent, same reason). */
+function buildServerChip(unreachable: boolean): HTMLElement {
+  const conn = getActiveConnection();
+  const chip = document.createElement("button");
+  chip.className = "icon-btn header-btn server-chip" + (unreachable ? " unreachable" : "");
+  chip.textContent = conn.id === "local" ? "⌂" : (conn.name || "?")[0].toUpperCase();
+  chip.title = unreachable
+    ? `${conn.name} — unreachable`
+    : `Server: ${conn.name} (${conn.url})`;
+  chip.addEventListener("click", () => {
+    const r = chip.getBoundingClientRect();
+    showServerMenu(r.left, r.bottom + 4);
+  });
+  return chip;
+}
+
+function showServerMenu(x: number, y: number): void {
+  document.getElementById("server-menu")?.remove();
+  const menu = document.createElement("div");
+  menu.id = "server-menu";
+  menu.className = "context-menu";
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  const active = getActiveConnection();
+  for (const c of getConnections()) {
+    const row = document.createElement("div");
+    row.className = "context-menu-item" + (c.id === active.id ? " active" : "");
+    row.textContent = `${c.id === active.id ? "✓ " : ""}${c.name}`;
+    row.title = c.url;
+    row.addEventListener("click", () => {
+      menu.remove();
+      if (c.id === active.id) return;
+      setActiveConnectionId(c.id);
+      window.location.reload();
+    });
+    menu.appendChild(row);
+  }
+  const manage = document.createElement("div");
+  manage.className = "context-menu-item";
+  manage.textContent = "Manage servers…";
+  manage.addEventListener("click", () => {
+    menu.remove();
+    openSettings();
+  });
+  menu.appendChild(manage);
+  document.body.appendChild(menu);
+  const dismiss = (e: MouseEvent) => {
+    if (!menu.contains(e.target as Node)) {
+      menu.remove();
+      document.removeEventListener("mousedown", dismiss);
+    }
+  };
+  setTimeout(() => document.addEventListener("mousedown", dismiss), 0);
 }
 
 function slugifyTeamName(name: string): string {
@@ -1743,15 +1854,17 @@ function renderAgentInfo() {
   agentInfoEl.appendChild(settingsBtn);
 
   // Model selector button (flat text + chevron, opens dropdown)
+  // In a channel, a per-channel override (if set) takes effect instead of the agent default.
+  const effectiveModel = (currentChannel && channelModelOverride) || agent.model;
   const modelBtn = document.createElement("button");
   modelBtn.className = "agent-model-btn";
-  const displayName = getModelDisplayName(agent.model);
+  const displayName = getModelDisplayName(effectiveModel);
   const effortHtml = agent.effort ? `<span class="effort-badge">${escapeHtml(agent.effort)}</span>` : "";
   modelBtn.innerHTML = `<span class="model-label">${escapeHtml(displayName)}</span>${effortHtml}<svg class="model-chevron" viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>`;
   if (models.length > 1 || agent.backend === "claude-cli") {
     modelBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      showModelMenu(e, agent, models);
+      showModelMenu(e, agent, models, effectiveModel);
     });
   } else {
     modelBtn.style.cursor = "default";
@@ -1801,7 +1914,7 @@ function showThrottleMenu(event: MouseEvent, agent: Agent, current: ThrottleStat
   setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
 }
 
-function showModelMenu(event: MouseEvent, agent: Agent, models: BackendModel[]) {
+function showModelMenu(event: MouseEvent, agent: Agent, models: BackendModel[], effectiveModel: string) {
   closeContextMenu();
   const menu = document.createElement("div");
   menu.className = "context-menu model-menu";
@@ -1816,8 +1929,8 @@ function showModelMenu(event: MouseEvent, agent: Agent, models: BackendModel[]) 
     for (const m of models) {
       const row = document.createElement("div");
       row.className = "context-menu-item model-menu-item";
-      if (m.name === agent.model) row.classList.add("active");
-      row.innerHTML = `<span>${escapeHtml(m.display_name)}</span>${m.name === agent.model ? '<svg class="check-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>' : ""}`;
+      if (m.name === effectiveModel) row.classList.add("active");
+      row.innerHTML = `<span>${escapeHtml(m.display_name)}</span>${m.name === effectiveModel ? '<svg class="check-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>' : ""}`;
       row.addEventListener("click", (e) => {
         e.stopPropagation();
         closeContextMenu();
@@ -1924,12 +2037,29 @@ async function applyThrottle(agent: Agent, state: ThrottleState) {
 }
 
 async function changeModel(agent: Agent, model: string) {
+  // In a channel: set a per-(channel, agent) override (persists for THIS channel only).
+  // Picking the agent's default clears the override. Outside a channel: change the
+  // agent's default model (all channels without an override follow it).
   try {
-    await updateAgent(agent.id, { model });
-    agent.model = model;
+    if (currentChannel) {
+      const clearing = model === agent.model;
+      await setChannelModelOverride(currentChannel.id, agent.id, clearing ? "" : model);
+      channelModelOverride = clearing ? null : model;
+    } else {
+      await updateAgent(agent.id, { model });
+      agent.model = model;
+    }
     renderAgentInfo();
   } catch (err) {
     console.error("Failed to change model:", err);
+  }
+}
+
+async function loadChannelModelOverride(channelId: string, agentId: string) {
+  try {
+    channelModelOverride = await getChannelModelOverride(channelId, agentId);
+  } catch {
+    channelModelOverride = null;
   }
 }
 
@@ -1955,8 +2085,6 @@ async function selectAgent(agent: Agent) {
   currentAgent = agent;
   localStorage.setItem("lit-desktop-agent", agent.id);
   await loadAgentThrottle(agent);
-  renderAgentTabs();
-  renderAgentInfo();
 
   if (currentChannel) {
     try {
@@ -1964,10 +2092,17 @@ async function selectAgent(agent: Agent) {
     } catch {
       // Non-critical
     }
+    await loadChannelModelOverride(currentChannel.id, agent.id);
+  } else {
+    channelModelOverride = null;
   }
+
+  renderAgentTabs();
+  renderAgentInfo();
 }
 
 async function loadChannelAgent(channelId: string) {
+  channelModelOverride = null;
   try {
     const config = await getChannelConfig(channelId);
     const agentId = config.agent_id as string | null;
@@ -1976,6 +2111,7 @@ async function loadChannelAgent(channelId: string) {
       if (agent) {
         currentAgent = agent;
         localStorage.setItem("lit-desktop-agent", agent.id);
+        await loadChannelModelOverride(channelId, agent.id);
         renderAgentTabs();
         renderAgentInfo();
         return;
@@ -1987,9 +2123,12 @@ async function loadChannelAgent(channelId: string) {
 
   if (agents.length > 0 && !currentAgent) {
     currentAgent = agents[0];
-    renderAgentTabs();
-    renderAgentInfo();
   }
+  if (currentAgent) {
+    await loadChannelModelOverride(channelId, currentAgent.id);
+  }
+  renderAgentTabs();
+  renderAgentInfo();
 }
 
 // --- Folder opening ---
@@ -2091,8 +2230,8 @@ async function archiveCurrentChannel() {
   try {
     await fetch(`${getServer().url}/mux/channels/${archived.id}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ team: "local" }),
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ team: getActiveTeam() }),
     });
   } catch { /* offline / already gone */ }
 
@@ -2433,6 +2572,7 @@ async function deleteMessage(channelId: string, messageId: string, el: HTMLEleme
   try {
     await fetch(`${getServer().url}/mux/channels/${channelId}/messages/${messageId}`, {
       method: "DELETE",
+      headers: authHeaders(),
     });
     el.remove();
     knownMessageIds.delete(messageId);
@@ -2690,15 +2830,17 @@ async function loadInitialData() {
   // The boot-time render races sidecar startup; re-render now that it's up.
   renderTeamsRail();
   try {
-    // Fetch agents, models, and channels in parallel
-    const [agentsData, modelsData, remote] = await Promise.all([
+    // Fetch agents, models, channels, and team apps in parallel
+    const [agentsData, modelsData, remote, appsData] = await Promise.all([
       fetchAgents(),
       fetchModels().catch(() => ({})),
       fetchChannels(),
+      fetchApps().catch(() => []),
     ]);
 
     agents = agentsData;
     backendModels = modelsData;
+    appsCache = appsData;
 
     if (agents.length > 0) {
       const savedAgentId = localStorage.getItem("lit-desktop-agent");
@@ -2795,10 +2937,15 @@ function getCommands(): Command[] {
     cmds.push({ id: `team-${slug}`, label: `Switch to team: ${t.name}`, icon: "⊞", action: () => switchTeam(slug) });
   }
 
+  for (const app of appsCache) {
+    cmds.push({ id: `app-${app.id}`, label: `Open app: ${app.title}`, icon: "🧩", action: () => openApp(app) });
+  }
+
   return cmds;
 }
 
 let channelListCache: Channel[] = [];
+let appsCache: AppWidget[] = [];
 let commandPaletteSelectedIndex = 0;
 
 function openCommandPalette() {
