@@ -30,50 +30,52 @@
           </div>
           <div id="terminal-host"></div>
         </div>
-        <!-- Chat panel content. Relocated into a dockview panel at startup; kept
-             intact here so all existing element refs/handlers (messagesEl,
-             inputArea, agent-tabs, ...) resolve unchanged. -->
-        <div id="chat-panel-root" hidden>
-          <nav id="sidebar">
-            <div id="channel-list">
-              <div class="section-label">Channels</div>
-            </div>
-          </nav>
-          <div id="sidebar-resize-handle"></div>
-          <div id="chat-main">
-            <header id="content-header">
-              <button id="sidebar-expand-btn" class="icon-btn header-btn" title="Show sidebar" style="display:none">&#9654;</button>
-              <h2 id="channel-title">Welcome</h2>
-              <div id="channel-actions"></div>
-              <button id="search-toggle-btn" class="icon-btn header-btn" title="Search this channel (Ctrl+F)">&#128269;</button>
-              <button id="terminal-toggle-btn" class="icon-btn header-btn" title="Toggle live terminal">&gt;_</button>
-            </header>
-            <div id="messages-wrapper">
-            <div id="messages">
-              <div class="message system">
-                <div class="message-content">
-                  <p><strong>LIT Desktop v2.0</strong></p>
-                  <p>Connect to a LIT server to get started.</p>
-                  <p class="hint">Use <kbd>Ctrl+K</kbd> to open the command palette.</p>
+        <!-- Chat panel content. ChatPanel.mount() clones this template into its
+             dockview panel host; all lookups inside are per-instance (classes,
+             not ids), so a future multi-instance UI can clone it repeatedly. -->
+        <template id="chat-panel-template">
+          <div class="chat-panel-root">
+            <nav class="sidebar">
+              <div class="channel-list">
+                <div class="section-label">Channels</div>
+              </div>
+            </nav>
+            <div class="sidebar-resize-handle"></div>
+            <div class="chat-main">
+              <header class="content-header">
+                <button class="icon-btn header-btn sidebar-expand-btn" title="Show sidebar" style="display:none">&#9654;</button>
+                <h2 class="channel-title">Welcome</h2>
+                <div class="channel-actions"></div>
+                <button class="icon-btn header-btn search-toggle-btn" title="Search this channel (Ctrl+F)">&#128269;</button>
+                <button class="icon-btn header-btn terminal-toggle-btn" title="Toggle live terminal">&gt;_</button>
+              </header>
+              <div class="messages-wrapper">
+              <div class="messages">
+                <div class="message system">
+                  <div class="message-content">
+                    <p><strong>LIT Desktop v2.0</strong></p>
+                    <p>Connect to a LIT server to get started.</p>
+                    <p class="hint">Use <kbd>Ctrl+K</kbd> to open the command palette.</p>
+                  </div>
                 </div>
               </div>
+              <button class="scroll-to-bottom" title="Scroll to bottom">
+                <span class="scroll-arrow">&#8595;</span>
+              </button>
             </div>
-            <button id="scroll-to-bottom" title="Scroll to bottom">
-              <span class="scroll-arrow">&#8595;</span>
-            </button>
-          </div>
-          <div id="input-resize-handle"></div>
-          <div id="input-area">
-            <div id="agent-tabs"></div>
-            <div id="agent-info"></div>
-            <div id="input-row">
-              <textarea id="message-input" placeholder="Type a message..." rows="1"></textarea>
-              <button id="cancel-stream-btn" title="Stop generating" style="display:none">&#9632;</button>
-              <button id="send-btn" title="Send (Enter)">&#8593;</button>
+            <div class="input-resize-handle"></div>
+            <div class="input-area">
+              <div class="agent-tabs"></div>
+              <div class="agent-info"></div>
+              <div class="input-row">
+                <textarea class="message-input" placeholder="Type a message..." rows="1"></textarea>
+                <button class="cancel-stream-btn" title="Stop generating" style="display:none">&#9632;</button>
+                <button class="send-btn" title="Send (Enter)">&#8593;</button>
+              </div>
+            </div>
             </div>
           </div>
-          </div>
-        </div>
+        </template>
       </main>
     </div>
     <div id="image-lightbox">
