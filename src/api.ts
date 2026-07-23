@@ -72,6 +72,11 @@ const nativeFetchP: Promise<typeof globalThis.fetch> =
     : Promise.resolve(globalThis.fetch.bind(globalThis));
 
 export async function hostFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  // Local backend stays on the webview's fetch (proven path, and the plugin's
+  // URL scope won't match explicit ports like 127.0.0.1:5000). Mirrors the
+  // WebSocket shim, which is also remote-only.
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (url.startsWith("http://127.0.0.1")) return globalThis.fetch(input, init);
   return (await nativeFetchP)(input, init);
 }
 
