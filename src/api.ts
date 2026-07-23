@@ -58,6 +58,23 @@ export interface BackendModel {
 
 export type ThrottleState = "disabled" | "enabled" | "safe" | "stopped";
 
+// ---- Native HTTP (packaged app) ----
+// The packaged webview serves the UI from the tauri:// custom scheme, and
+// Linux WebKitGTK refuses cross-origin https fetches from custom-scheme pages
+// ("Load failed") — remote servers are unreachable via window.fetch. Route all
+// API traffic through the Rust host's HTTP client instead (immune to webview
+// scheme/CORS rules). Dev (vite origin) and plain browsers keep window.fetch.
+const nativeFetchP: Promise<typeof globalThis.fetch> =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
+    ? import("@tauri-apps/plugin-http")
+        .then((m) => m.fetch as typeof globalThis.fetch)
+        .catch(() => globalThis.fetch.bind(globalThis))
+    : Promise.resolve(globalThis.fetch.bind(globalThis));
+
+export async function hostFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return (await nativeFetchP)(input, init);
+}
+
 // ---- Connections (servers) ----
 // A Connection makes a host's addresses reachable (see docs/plans/address-model.md).
 // "Connection" always means a server connection — frontier-model credentials are
@@ -181,7 +198,7 @@ function oidcBase(conn: Connection): string {
 }
 
 export async function startDeviceAuth(conn: Connection): Promise<DeviceAuthStart> {
-  const res = await fetch(`${oidcBase(conn)}/auth/device`, {
+  const res = await hostFetch(`${oidcBase(conn)}/auth/device`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ client_id: DEVICE_CLIENT_ID, scope: "openid" }),
@@ -193,7 +210,7 @@ export async function startDeviceAuth(conn: Connection): Promise<DeviceAuthStart
 /** One poll for the device-flow token. Returns true once signed in (tokens are
  *  stored on the connection), false while the user hasn't approved yet. */
 export async function pollDeviceToken(conn: Connection, deviceCode: string): Promise<boolean> {
-  const res = await fetch(`${oidcBase(conn)}/token`, {
+  const res = await hostFetch(`${oidcBase(conn)}/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -235,7 +252,7 @@ async function ensureFreshToken(conn: Connection): Promise<void> {
   if (conn.auth !== "keycloak" || !conn.refreshToken) return;
   const now = Math.floor(Date.now() / 1000);
   if (conn.token && conn.tokenExpiresAt && conn.tokenExpiresAt - now > 30) return;
-  const res = await fetch(`${oidcBase(conn)}/token`, {
+  const res = await hostFetch(`${oidcBase(conn)}/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -265,7 +282,7 @@ async function apiFetch<T>(path: string, options?: RequestInit, scope: Scope = a
   await ensureFreshToken(conn);
   const headers = new Headers(options?.headers);
   if (conn.token) headers.set("Authorization", `Bearer ${conn.token}`);
-  const res = await fetch(`${conn.url}/mux${path}`, { ...options, headers });
+  const res = await hostFetch(`${conn.url}/mux${path}`, { ...options, headers });
   if (res.status === 401 || res.status === 403) {
     throw new Error(`AUTH_REQUIRED: ${res.status} from ${conn.name}`);
   }
@@ -497,7 +514,7 @@ export async function postChannelMessage(
 }
 
 export async function openFolder(folderPath: string, name?: string, scope: Scope = activeScope()): Promise<{ id: string; name: string }> {
-  const res = await fetch(`${scope.connection.url}/mux/channels/open-folder`, {
+  const res = await hostFetch(`${scope.connection.url}/mux/channels/open-folder`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders(scope.connection) },
     body: JSON.stringify({ folder_path: folderPath, name, team: scope.team }),
@@ -521,7 +538,7 @@ export async function markChannelRead(channelId: string, scope: Scope = activeSc
 }
 
 export async function setChannelAgent(channelId: string, agentId: string, scope: Scope = activeScope()): Promise<void> {
-  await fetch(`${scope.connection.url}/mux/channels/${channelId}/config`, {
+  await hostFetch(`${scope.connection.url}/mux/channels/${channelId}/config`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", ...authHeaders(scope.connection) },
     body: JSON.stringify({ agent_id: agentId, team: scope.team }),
@@ -653,7 +670,7 @@ export async function fetchUsage(backendId: string, scope: Scope = activeScope()
 }
 
 export async function cancelStream(streamId: string, scope: Scope = activeScope()): Promise<void> {
-  await fetch(`${scope.connection.url}/mux/streams/${streamId}/cancel`, {
+  await hostFetch(`${scope.connection.url}/mux/streams/${streamId}/cancel`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders(scope.connection) },
     body: JSON.stringify({}),
@@ -666,7 +683,7 @@ export async function uploadImage(file: File, channelId?: string, scope: Scope =
   const base = scope.connection.url;
   let url = `${base}/mux/api/upload`;
   if (channelId) url += `?channel_id=${encodeURIComponent(channelId)}`;
-  const res = await fetch(url, { method: "POST", headers: authHeaders(scope.connection), body: formData });
+  const res = await hostFetch(url, { method: "POST", headers: authHeaders(scope.connection), body: formData });
   if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
   const data = await res.json();
   return { url: `${base}/mux${data.url}`, filename: data.filename };

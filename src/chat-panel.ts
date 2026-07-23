@@ -10,6 +10,7 @@
 // (root.querySelector on classes, never document.getElementById).
 
 import {
+  hostFetch,
   fetchAgents,
   fetchChannels,
   fetchChannelMessages,
@@ -1737,7 +1738,7 @@ export class ChatPanel {
     // drops from navigation). Await it before refreshing, or the refresh races the
     // archive and the channel reappears.
     try {
-      await fetch(`${this.scope.connection.url}/mux/channels/${archived.id}`, {
+      await hostFetch(`${this.scope.connection.url}/mux/channels/${archived.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", ...authHeaders(this.scope.connection) },
         body: JSON.stringify({ team: this.scope.team }),
@@ -2061,7 +2062,7 @@ export class ChatPanel {
 
   private async deleteMessage(channelId: string, messageId: string, el: HTMLElement): Promise<void> {
     try {
-      await fetch(`${this.scope.connection.url}/mux/channels/${channelId}/messages/${messageId}`, {
+      await hostFetch(`${this.scope.connection.url}/mux/channels/${channelId}/messages/${messageId}`, {
         method: "DELETE",
         headers: authHeaders(this.scope.connection),
       });
