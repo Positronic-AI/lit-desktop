@@ -6,7 +6,7 @@ import {
   setCredentialApiKey, fetchBackendStatus, backendForVendorMode,
   startOAuth, oauthStatus, submitOAuthCode, cancelOAuth,
   fetchModelsWithConstraints, fetchFullAgents, getAgent, saveAgent, deleteAgent,
-  fetchDefaultPrompt, getServer, getActiveTeam,
+  fetchDefaultPrompt,
   getConnections, saveConnection, removeConnection,
   getActiveConnection, setActiveConnectionId,
   startDeviceAuth, pollDeviceToken, signedInUser,
@@ -83,61 +83,56 @@ async function openExternal(url: string): Promise<void> {
 
 // ---------------------------------------------------------------------------
 
-let overlay: HTMLElement | null = null;
 let onCloseCb: (() => void) | null = null;
 let pendingAgentId: string | null = null; // "new" = create form; an id = edit form
+// Credential to preselect in the next agent-create form — set by the wizard's
+// first-run funnel (fresh credential + zero agents → straight to agent create).
+let pendingCredentialId: string | null = null;
+
+// Settings lives in a dock tab like every other surface — one container
+// paradigm, no modal. main.ts injects the opener (settings.ts can't import the
+// WindowManager without a cycle).
+let panelOpener: (() => void) | null = null;
+export function registerSettingsOpener(fn: () => void): void {
+  panelOpener = fn;
+}
 
 export function openSettings(
   onClose?: () => void,
   target?: { tab?: "connections" | "agents"; agentId?: string },
 ): void {
   onCloseCb = onClose || null;
-  if (!overlay) {
-    overlay = el("div", "settings-overlay");
-    overlay.id = "settings-overlay";
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) closeSettings();
-    });
-    // Escape closes the dialog — familiar keyboard pattern (registered once).
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && overlay?.classList.contains("active")) {
-        e.preventDefault();
-        e.stopPropagation();
-        closeSettings();
-      }
-    });
-    document.body.appendChild(overlay);
-  }
-  overlay.innerHTML = "";
-  overlay.appendChild(buildShell());
-  overlay.classList.add("active");
   pendingAgentId = target?.agentId || null;
+  panelOpener?.();
+  // Already mounted (tab was open): re-render so a deep-link target (e.g. the
+  // agent form) takes effect now rather than on next mount.
+  if (bodyEl?.isConnected) renderSetup();
+}
+
+/** Panel mount — called by the dock when the Settings tab renders. */
+export function mountSettingsPanel(host: HTMLElement): void {
+  const wrap = el("div", "settings-panel");
+  bodyEl = el("div", "settings-body");
+  wrap.appendChild(bodyEl);
+  host.appendChild(wrap);
   renderSetup();
 }
 
-function closeSettings(): void {
-  overlay?.classList.remove("active");
-  if (onCloseCb) onCloseCb();
+/** Panel dispose — closing the tab commits the "done configuring" moment. */
+export function disposeSettingsPanel(): void {
+  const cb = onCloseCb;
+  onCloseCb = null;
+  cb?.();
 }
 
 let bodyEl: HTMLElement;
 let connRoot: HTMLElement;   // content container for the Connections section
 let agentRoot: HTMLElement;  // content container for the Agents section
-
-function buildShell(): HTMLElement {
-  const modal = el("div", "settings-modal");
-
-  const header = el("div", "settings-header");
-  const title = el("h2", undefined, "Setup");
-  const close = el("button", "settings-close", "×");
-  close.title = "Close";
-  close.addEventListener("click", closeSettings);
-  header.append(title, close);
-
-  bodyEl = el("div", "settings-body");
-  modal.append(header, bodyEl);
-  return modal;
-}
+// Section-header status chips (webapp Setup's checklist semantics: each
+// section says at a glance whether it's done or what's missing).
+let connStatusEl: HTMLElement;
+let agentStatusEl: HTMLElement;
+let serversStatusEl: HTMLElement;
 
 // Single Setup screen: Connections and Agents stacked as two sections, so Agents
 // is never hidden behind a tab (mirrors the web app's Setup wizard, where users
@@ -145,27 +140,39 @@ function buildShell(): HTMLElement {
 function renderSetup(): void {
   bodyEl.innerHTML = "";
   const connSection = el("div", "setup-section");
-  connSection.appendChild(el("h3", "setup-section-title", "Credentials"));
+  const connTitle = el("h3", "setup-section-title", "Credentials");
+  connStatusEl = el("span", "section-status", "");
+  connTitle.appendChild(connStatusEl);
+  connSection.appendChild(connTitle);
   connRoot = el("div", "setup-section-body");
   connSection.appendChild(connRoot);
 
   const agentSection = el("div", "setup-section");
-  agentSection.appendChild(el("h3", "setup-section-title", "Agents"));
+  const agentTitle = el("h3", "setup-section-title", "Agents");
+  agentStatusEl = el("span", "section-status", "");
+  agentTitle.appendChild(agentStatusEl);
+  agentSection.appendChild(agentTitle);
+  agentSection.appendChild(
+    el("p", "settings-intro", "The model here is the agent's default — override it per channel from the channel's model selector."),
+  );
   agentRoot = el("div", "setup-section-body");
   agentSection.appendChild(agentRoot);
 
-  const toolsSection = el("div", "setup-section");
-  toolsSection.appendChild(el("h3", "setup-section-title", "Connect your tools"));
-  const toolsRoot = el("div", "setup-section-body");
-  toolsRoot.appendChild(buildToolsFrame());
-  toolsSection.appendChild(toolsRoot);
+  // No tools section: Setup is host-scoped infrastructure (credentials, agents,
+  // servers) — the minimum path to "usable". Tool connectors are team-scoped
+  // apps, reached from a place (Ctrl+K → "Open app: …"), so the connection you
+  // make is unambiguous about whose data it touches (see the 2026-07-23
+  // tools-scoping discussion: capability follows agent, authority follows team).
 
   const serversSection = el("div", "setup-section");
-  serversSection.appendChild(el("h3", "setup-section-title", "Servers"));
+  const serversTitle = el("h3", "setup-section-title", "Connections");
+  serversStatusEl = el("span", "section-status", "");
+  serversTitle.appendChild(serversStatusEl);
+  serversSection.appendChild(serversTitle);
   serversRoot = el("div", "setup-section-body");
   serversSection.appendChild(serversRoot);
 
-  bodyEl.append(connSection, agentSection, toolsSection, serversSection);
+  bodyEl.append(serversSection, connSection, agentSection);
   renderConnections();
   renderAgents();
   renderServers();
@@ -182,34 +189,55 @@ function renderServers(): void {
   serversRoot.innerHTML = "";
   const active = getActiveConnection();
 
-  for (const c of getConnections()) {
-    const row = el("div", "cred-detail-line");
-    const label = el("span", undefined, `${c.name} `);
-    (label as HTMLElement).style.fontWeight = "600";
-    const url = el("span", "settings-empty", c.url);
-    row.append(label, url);
+  const remotes = getConnections().filter((c) => c.id !== "local").length;
+  serversStatusEl.textContent = remotes ? `local + ${remotes} remote` : "local only";
+  serversStatusEl.className = "section-status ok";
 
+  serversRoot.appendChild(
+    el("p", "settings-intro", "A Connection is a LIT server this app can reach. Local is built in; add a connection to work on a remote server too."),
+  );
+
+  const list = el("div", "cred-list");
+  for (const c of getConnections()) {
+    // Same card grammar as credentials and agents: name + badges left,
+    // status + actions right.
+    const card = el("div", "cred-card");
+    const head = el("div", "cred-head conn-head");
+    const left = el("div", "cred-head-left");
+    left.append(
+      el("span", "cred-name", c.name),
+      el("span", "cred-badge", c.url),
+    );
     if (c.auth === "keycloak") {
       const user = signedInUser(c);
-      if (c.refreshToken && user) {
-        row.appendChild(el("span", "settings-link", ` · ${user}`));
-      } else {
-        const signIn = el("button", "settings-mini-btn", "Sign in") as HTMLButtonElement;
-        signIn.addEventListener("click", () => deviceSignIn(c, row, signIn));
-        row.appendChild(signIn);
-      }
+      if (c.refreshToken && user) left.appendChild(el("span", "cred-badge mode-subscription", user));
+    }
+    const right = el("div", "conn-head-right");
+    if (c.auth === "keycloak" && !(c.refreshToken && signedInUser(c))) {
+      const signIn = el("button", "settings-mini-btn", "Sign in") as HTMLButtonElement;
+      signIn.addEventListener("click", () => deviceSignIn(c, head, signIn));
+      right.appendChild(signIn);
     }
     if (c.id === active.id) {
-      row.appendChild(el("span", "settings-link", " · connected"));
+      right.appendChild(el("span", "cred-status ok", "Connected"));
     } else {
       const use = el("button", "settings-mini-btn", "Connect") as HTMLButtonElement;
       use.addEventListener("click", () => {
-        setActiveConnectionId(c.id);
-        // Same precedent as team flips (and VS Code remotes): the whole
-        // workspace scopes to the place — a reload swaps it cleanly.
-        window.location.reload();
+        const activate = () => {
+          setActiveConnectionId(c.id);
+          // Same precedent as team flips (and VS Code remotes): the whole
+          // workspace scopes to the place — a reload swaps it cleanly.
+          window.location.reload();
+        };
+        // Connect means the whole motion: authenticate if needed, then switch.
+        // (Users read "Connect" as "get me onto this server" — honor that.)
+        if (c.auth === "keycloak" && !(c.refreshToken && signedInUser(c))) {
+          void deviceSignIn(c, head, use, activate);
+        } else {
+          activate();
+        }
       });
-      row.appendChild(use);
+      right.appendChild(use);
     }
     if (c.id !== "local") {
       const rm = el("button", "settings-mini-btn ghost", "Remove") as HTMLButtonElement;
@@ -217,31 +245,57 @@ function renderServers(): void {
         removeConnection(c.id);
         renderServers();
       });
-      row.appendChild(rm);
+      right.appendChild(rm);
     }
-    serversRoot.appendChild(row);
+    head.append(left, right);
+    card.appendChild(head);
+    list.appendChild(card);
   }
+  serversRoot.appendChild(list);
 
   // Add-server form. Auth server + realm are only needed until servers expose
   // auth discovery; leaving them blank means "no auth" (e.g. a LAN box).
-  const form = el("div", "team-new-row");
-  const nameInput = document.createElement("input");
-  nameInput.className = "settings-input";
-  nameInput.placeholder = "Name (e.g. JovAI)";
-  const urlInput = document.createElement("input");
-  urlInput.className = "settings-input wide";
-  urlInput.placeholder = "https://app.jov.ai";
-  const authInput = document.createElement("input");
-  authInput.className = "settings-input wide";
-  authInput.placeholder = "Auth server (https://auth.lit.ai)";
-  const realmInput = document.createElement("input");
-  realmInput.className = "settings-input";
-  realmInput.placeholder = "Realm (JOV-AI)";
-  const add = el("button", "settings-primary-btn", "Add server") as HTMLButtonElement;
+  // Add-flow opens a focused screen with a Back return — the same pattern as
+  // the credential wizard and the agent form. One flow, one screen.
+  const reveal = el("button", "settings-primary-btn", "+ Add connection") as HTMLButtonElement;
+  reveal.addEventListener("click", () => openAddConnection());
+  serversRoot.appendChild(reveal);
+}
+
+/** Focused add-connection screen. Auth server + realm are only needed until
+ *  servers expose auth discovery; blank means "no auth" (e.g. a LAN box). */
+function openAddConnection(): void {
+  bodyEl.innerHTML = "";
+  const back = el("button", "settings-mini-btn ghost", "← Back to setup");
+  back.addEventListener("click", () => renderSetup());
+  bodyEl.appendChild(back);
+
+  const panel = el("div", "cred-wizard");
+  panel.appendChild(el("div", "wizard-step-label", "Add a connection"));
+  panel.appendChild(el("p", "settings-intro", "Point the app at a LIT server. Auth server and realm are only needed for servers with sign-in — leave them blank for an open LAN box."));
+
+  const mkInput = (placeholder: string): HTMLInputElement => {
+    const i = document.createElement("input");
+    i.className = "settings-input wide";
+    i.placeholder = placeholder;
+    return i;
+  };
+  const nameInput = mkInput("Name (e.g. JovAI)");
+  const urlInput = mkInput("Server URL (https://app.jov.ai)");
+  const authInput = mkInput("Auth server (https://auth.lit.ai) — optional");
+  const realmInput = mkInput("Realm (JOV-AI) — optional");
+
+  const add = el("button", "settings-primary-btn", "Add connection") as HTMLButtonElement;
+  const err = el("div", "settings-error");
+  err.style.display = "none";
   add.addEventListener("click", () => {
     const name = nameInput.value.trim();
     const rawUrl = urlInput.value.trim().replace(/\/+$/, "");
-    if (!name || !rawUrl) return;
+    if (!name || !rawUrl) {
+      err.textContent = "A name and server URL are required.";
+      err.style.display = "";
+      return;
+    }
     const authUrl = authInput.value.trim().replace(/\/+$/, "");
     const conn: Connection = {
       id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || `srv-${Date.now()}`,
@@ -252,17 +306,22 @@ function renderServers(): void {
       realm: realmInput.value.trim() || undefined,
     };
     saveConnection(conn);
-    nameInput.value = urlInput.value = authInput.value = realmInput.value = "";
-    renderServers();
+    renderSetup();
   });
-  form.append(nameInput, urlInput, authInput, realmInput, add);
-  serversRoot.appendChild(form);
+
+  panel.append(nameInput, urlInput, authInput, realmInput, add, err);
+  bodyEl.appendChild(panel);
 }
 
 /** Device-flow sign-in: open the browser to the verification URL, show the
  *  code, poll until approved. One sign-in lasts the Keycloak SSO session —
  *  the 5-minute access tokens refresh themselves from then on. */
-async function deviceSignIn(conn: Connection, row: HTMLElement, btn: HTMLButtonElement): Promise<void> {
+async function deviceSignIn(
+  conn: Connection,
+  row: HTMLElement,
+  btn: HTMLButtonElement,
+  onSuccess?: () => void,
+): Promise<void> {
   btn.disabled = true;
   const status = el("span", "settings-empty", " starting…");
   row.appendChild(status);
@@ -274,7 +333,8 @@ async function deviceSignIn(conn: Connection, row: HTMLElement, btn: HTMLButtonE
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, Math.max(start.interval, 5) * 1000));
       if (await pollDeviceToken(conn, start.device_code)) {
-        renderServers();
+        if (onSuccess) onSuccess();
+        else renderServers();
         return;
       }
     }
@@ -284,40 +344,6 @@ async function deviceSignIn(conn: Connection, row: HTMLElement, btn: HTMLButtonE
     status.textContent = ` sign-in failed: ${e instanceof Error ? e.message : e}`;
     btn.disabled = false;
   }
-}
-
-/** "Connect your tools" — hosts the team's connector app in an iframe served
- *  from the sidecar's own origin, so the app's relative /mux fetches and its
- *  OAuth redirect_uri self-align with the backend.
- *  Team→app map is provisional (the IP boundary made visible: JovAI's
- *  integrations-hub in their team, litai's google-workspace elsewhere) —
- *  replace with real app discovery when Team Apps lands. */
-const TEAM_CONNECTOR_APPS: Record<string, [string, string]> = {
-  jovai: ["jovai", "integrations-hub"],
-};
-
-function buildToolsFrame(): HTMLIFrameElement {
-  const frame = document.createElement("iframe");
-  frame.className = "tools-app-frame";
-  const [appTeam, appName] = TEAM_CONNECTOR_APPS[getActiveTeam()] || ["everyone", "google-workspace"];
-  frame.src = `${getServer().url}/mux/app-host/${appTeam}/${appName}?operating_team=${encodeURIComponent(getActiveTeam())}`;
-  const postTheme = () => {
-    const theme = document.documentElement.getAttribute("data-theme") || "dark";
-    frame.contentWindow?.postMessage({ type: "lit-theme", theme }, "*");
-  };
-  frame.addEventListener("load", postTheme);
-  new MutationObserver(postTheme).observe(document.documentElement, {
-    attributes: true,
-    attributeFilter: ["data-theme"],
-  });
-  // The hosted app's window.open is forwarded here (webviews swallow popups);
-  // open auth URLs in the system browser instead.
-  window.addEventListener("message", (ev) => {
-    if (ev.source === frame.contentWindow && ev.data?.type === "lit-open-url") {
-      openExternal(ev.data.url);
-    }
-  });
-  return frame;
 }
 
 // --- Connections tab -------------------------------------------------------
@@ -331,10 +357,22 @@ async function renderConnections(): Promise<void> {
     creds = await listCredentials();
   } catch (e) {
     root.innerHTML = "";
-    root.appendChild(el("div", "settings-error", "Failed to load connections."));
+    root.appendChild(el("div", "settings-error", "Failed to load credentials."));
     return;
   }
   root.innerHTML = "";
+
+  const connected = creds.filter((c) => statusMeta(c.status).cls === "ok").length;
+  if (creds.length === 0) {
+    connStatusEl.textContent = "none yet";
+    connStatusEl.className = "section-status warn";
+  } else if (connected === creds.length) {
+    connStatusEl.textContent = `${connected} connected`;
+    connStatusEl.className = "section-status ok";
+  } else {
+    connStatusEl.textContent = `${connected} of ${creds.length} connected`;
+    connStatusEl.className = "section-status warn";
+  }
 
   const intro = el("p", "settings-intro", "A Credential is a subscription login or a metered API key that you bind to agents.");
   root.appendChild(intro);
@@ -342,8 +380,9 @@ async function renderConnections(): Promise<void> {
   if (creds.length === 0) {
     const empty = el("div", "settings-empty");
     empty.append(
-      el("p", undefined, "No connections yet."),
+      el("p", undefined, "No credentials yet."),
       el("p", "muted", "Add your Claude subscription or an API key to get started."),
+      el("p", "muted", "Using local models (Ollama)? No credential needed — skip straight to creating an agent."),
     );
     root.appendChild(empty);
   }
@@ -352,7 +391,7 @@ async function renderConnections(): Promise<void> {
   for (const c of creds) list.appendChild(credCard(c));
   root.appendChild(list);
 
-  const add = el("button", "settings-primary-btn", "+ New connection");
+  const add = el("button", "settings-primary-btn", "+ New credential");
   add.addEventListener("click", () => openCreateWizard());
   root.appendChild(add);
 }
@@ -366,7 +405,7 @@ function credCard(c: Credential): HTMLElement {
   left.append(
     el("span", "cred-name", c.name || c.id || "Default"),
     el("span", "cred-badge vendor", vendorMeta(c.vendor).label),
-    el("span", "cred-badge mode", modeLabel(c.vendor, c.mode)),
+    el("span", `cred-badge mode mode-${c.mode}`, modeLabel(c.vendor, c.mode)),
   );
   const status = el("span", `cred-status ${sm.cls}`, sm.label);
   head.append(left, status);
@@ -468,9 +507,9 @@ async function renderCredDetail(detail: HTMLElement, c: Credential): Promise<voi
     }
 
     // Delete
-    const del = el("button", "settings-danger-link", "Delete connection");
+    const del = el("button", "settings-danger-link", "Delete credential");
     del.addEventListener("click", async () => {
-      if (!confirm(`Delete connection "${c.name}"?`)) return;
+      if (!confirm(`Delete credential "${c.name}"?`)) return;
       try { await deleteCredential(c.id!); renderConnections(); } catch {}
     });
     detail.appendChild(del);
@@ -521,7 +560,7 @@ function openCreateWizard(): void {
 
   const stepName = () => {
     const vm = vendorMeta(state.vendor!);
-    panel.appendChild(el("div", "wizard-step-label", "Step 3 · Name this connection"));
+    panel.appendChild(el("div", "wizard-step-label", "Step 3 · Name this credential"));
     const nameInput = document.createElement("input");
     nameInput.type = "text";
     nameInput.className = "settings-input wide";
@@ -550,20 +589,31 @@ function openCreateWizard(): void {
       err.style.display = "none";
       try {
         const cred = await createCredential({ id: slug(name), name, vendor: state.vendor!, mode: state.mode! });
+        // First-run funnel: with zero agents, the only sensible next step after
+        // connecting is creating the agent — go straight to that form with the
+        // fresh credential preselected instead of dropping back to Setup.
+        const funnelToAgent = async () => {
+          const agents = await fetchFullAgents().catch(() => [] as FullAgent[]);
+          if (agents.length === 0) {
+            pendingAgentId = "new";
+            pendingCredentialId = cred.id ?? null;
+          }
+          renderSetup();
+        };
         if (isKey) {
           await setCredentialApiKey(cred.id!, keyInput!.value.trim());
-          renderSetup();
+          await funnelToAgent();
         } else {
           // subscription → OAuth
           const host = el("div");
           panel.innerHTML = "";
           panel.appendChild(host);
-          runOAuth(host, cred, () => renderSetup());
+          runOAuth(host, cred, () => void funnelToAgent());
         }
       } catch (e) {
         go.textContent = isKey ? "Create & connect" : "Create & sign in";
         go.removeAttribute("disabled");
-        err.textContent = "Could not create the connection.";
+        err.textContent = "Could not create the credential.";
         err.style.display = "";
       }
     });
@@ -572,6 +622,9 @@ function openCreateWizard(): void {
     panel.append(go, err, back);
   };
 
+  // Focused screen: add-flows take over the page with a Back return. Tried
+  // inline (2026-07-23) — a half-completed wizard sandwiched between live
+  // sections read as three simultaneous states. One flow, one screen.
   bodyEl.innerHTML = "";
   const cancel = el("button", "settings-mini-btn ghost", "← Back to setup");
   cancel.addEventListener("click", () => renderSetup());
@@ -692,6 +745,15 @@ async function renderAgents(): Promise<void> {
     return;
   }
   root.innerHTML = "";
+
+  if (agents.length === 0) {
+    agentStatusEl.textContent = "none yet — create one to start chatting";
+    agentStatusEl.className = "section-status warn";
+  } else {
+    const listening = agents.filter((a) => (a as any).heartbeat_enabled).length;
+    agentStatusEl.textContent = `${agents.length} agent${agents.length === 1 ? "" : "s"} · ${listening} listening`;
+    agentStatusEl.className = `section-status ${listening > 0 ? "ok" : "warn"}`;
+  }
   // Opened via the + button or a per-agent gear → jump straight to the form
   // (a focused, full-screen flow that returns to the Setup screen).
   if (pendingAgentId) {
@@ -720,7 +782,7 @@ function agentRow(a: FullAgent): HTMLElement {
   const info = el("div", "agent-row-info");
   info.append(el("span", "agent-row-name", a.name || a.id));
   const c = credFor(a.credentials_id);
-  const badge = c ? modeLabel(c.vendor, c.mode) : "No connection";
+  const badge = c ? modeLabel(c.vendor, c.mode) : "No credential";
   info.append(el("span", `agent-row-badge ${c ? "" : "muted"}`, badge));
   row.appendChild(info);
 
@@ -731,7 +793,7 @@ function agentRow(a: FullAgent): HTMLElement {
   credSel.className = "settings-select";
   const none = document.createElement("option");
   none.value = "";
-  none.textContent = "No connection";
+  none.textContent = "No credential (local models)";
   credSel.appendChild(none);
   for (const cr of credCache) {
     if (!cr.id) continue;
@@ -819,16 +881,17 @@ async function openAgentForm(agentId: string | null): Promise<void> {
   const credSel = document.createElement("select");
   credSel.className = "settings-select wide";
   const none = document.createElement("option");
-  none.value = ""; none.textContent = "No connection";
+  none.value = ""; none.textContent = "No credential (local models)";
   credSel.appendChild(none);
   for (const cr of credCache) {
     if (!cr.id) continue;
     const o = document.createElement("option");
     o.value = cr.id;
     o.textContent = `${cr.name} (${modeLabel(cr.vendor, cr.mode)})`;
-    if (cr.id === existing?.credentials_id) o.selected = true;
+    if (cr.id === (existing?.credentials_id ?? pendingCredentialId)) o.selected = true;
     credSel.appendChild(o);
   }
+  pendingCredentialId = null;
 
   const modelSel = document.createElement("select");
   modelSel.className = "settings-select wide";
@@ -867,6 +930,14 @@ async function openAgentForm(agentId: string | null): Promise<void> {
     effortSel.appendChild(o);
   }
 
+  // Heartbeat — whether the agent listens and responds to channel messages.
+  // Durable config for the old composer heart button (new agents: on).
+  const listenWrap = el("label", "form-check");
+  const listenInput = document.createElement("input");
+  listenInput.type = "checkbox";
+  listenInput.checked = existing ? Boolean((existing as any).heartbeat_enabled) : true;
+  listenWrap.append(listenInput, document.createTextNode(" Listening — responds to channel messages"));
+
   const field = (label: string, control: HTMLElement) => {
     const f = el("div", "form-field");
     f.append(el("label", "form-label", label), control);
@@ -878,6 +949,7 @@ async function openAgentForm(agentId: string | null): Promise<void> {
     field("Credential", credSel),
     field("Backend", backendSel),
     field("Model", modelSel),
+    listenWrap,
     el("div", "form-section-label", "Role"),
     field("System prompt", promptInput),
     el("div", "form-section-label", "Advanced"),
@@ -907,6 +979,9 @@ async function openAgentForm(agentId: string | null): Promise<void> {
         system_prompt: promptInput.value,
         temperature: parseFloat(tempInput.value) || 0.7,
         effort: effortSel.value || null,
+        // An agent that can't hear the channel is indistinguishable from a
+        // broken install (Spuds, 2026-07-23). New agents listen by default.
+        heartbeat_enabled: listenInput.checked,
       });
       renderSetup();
     } catch {

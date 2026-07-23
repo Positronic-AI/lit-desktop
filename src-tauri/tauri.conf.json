@@ -19,7 +19,8 @@
         "minWidth": 800,
         "minHeight": 600,
         "decorations": true,
-        "transparent": false
+        "transparent": false,
+        "additionalBrowserArgs": "--disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,msWebOOUI,msPdfOOUI"
       }
     ],
     "security": {

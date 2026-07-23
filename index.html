@@ -50,12 +50,13 @@
               </header>
               <div class="messages-wrapper">
               <div class="messages">
-                <div class="message system">
-                  <div class="message-content">
-                    <p><strong>LIT Desktop v2.0</strong></p>
-                    <p>Connect to a LIT server to get started.</p>
-                    <p class="hint">Use <kbd>Ctrl+K</kbd> to open the command palette.</p>
-                  </div>
+                <!-- Boot state — replaced by the first real render; brand and
+                     version are stamped by init() (template stays brand-neutral). -->
+                <div class="boot-state">
+                  <div class="boot-brand"><span class="boot-brand-name"></span><span class="boot-version"></span></div>
+                  <div class="boot-spinner"></div>
+                  <div class="boot-text">Starting…</div>
+                  <div class="boot-hint">First launch can take a minute while things unpack.</div>
                 </div>
               </div>
               <button class="scroll-to-bottom" title="Scroll to bottom">

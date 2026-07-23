@@ -33,6 +33,7 @@ import {
   getInterrupt,
   fetchUsage,
   fetchBackendStatus,
+  getAgent,
   cancelStream,
   uploadImage,
   authHeaders,
@@ -1368,10 +1369,10 @@ export class ChatPanel {
     content.innerHTML =
       logoHtml +
       `<p><strong>Welcome to ${brand.displayName}.</strong></p>` +
-      "<p>To get started, add a connection (your Claude subscription or an API key) and create an agent.</p>";
+      "<p>To get started, add a credential (your Claude subscription or an API key) and create an agent.</p>";
     const btn = document.createElement("button");
     btn.className = "settings-primary-btn";
-    btn.textContent = "Set up a connection & agent";
+    btn.textContent = "Set up a credential & agent";
     btn.addEventListener("click", () => openSettings(() => this.onReload?.()));
     content.appendChild(btn);
     wrap.appendChild(content);
@@ -1400,6 +1401,12 @@ export class ChatPanel {
       tab.innerHTML = `<span class="status-indicator ${presenceClass}"></span><span>${escapeHtml(agent.name)}</span>`;
 
       tab.addEventListener("click", () => this.selectAgent(agent));
+      // Runtime heartbeat controls (enable/disable/safe/pause) — the old
+      // composer heart button, relocated out of prime real estate.
+      tab.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        this.showThrottleMenu(e, agent, this.agentThrottles[agent.id] || "disabled");
+      });
       this.agentTabsEl.appendChild(tab);
     }
 
@@ -1423,18 +1430,11 @@ export class ChatPanel {
     const usage = this.usageReports[agent.backend];
 
     this.agentInfoEl.innerHTML = "";
-
-    // Throttle icon button
-    const throttleBtn = document.createElement("button");
-    throttleBtn.className = `agent-ctrl-btn throttle-btn throttle-${throttle}`;
-    throttleBtn.title = THROTTLE_LABEL[throttle];
-    throttleBtn.innerHTML = THROTTLE_SVG[throttle];
-    throttleBtn.style.color = THROTTLE_COLOR[throttle];
-    throttleBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.showThrottleMenu(e, agent, throttle);
-    });
-    this.agentInfoEl.appendChild(throttleBtn);
+    // The heartbeat throttle no longer lives here — durable on/off is in agent
+    // settings ("Listening"), and the runtime menu (safe mode / pause) opens
+    // from a right-click on the agent tab. It was composer-adjacent only as an
+    // emergency brake from the early heartbeat days.
+    void throttle;
 
     // Settings icon button
     const settingsBtn = document.createElement("button");
@@ -1639,7 +1639,11 @@ export class ChatPanel {
     let authState: string | null = null;
     if (agent) {
       try {
-        const st = await fetchBackendStatus(agent.backend, undefined, this.scope);
+        // Probe with the agent's bound credential — without credentials_id the
+        // backend checks the legacy CLI login location and reports a freshly
+        // connected wizard credential as signed out.
+        const full = await getAgent(agent.id, this.scope);
+        const st = await fetchBackendStatus(agent.backend, full?.credentials_id ?? undefined, this.scope);
         authState = st.auth_status;
       } catch {
         authState = null;

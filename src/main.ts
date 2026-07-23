@@ -21,7 +21,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { Command as ShellCommand, type Child } from "@tauri-apps/plugin-shell";
 import { renderMarkdown } from "./markdown";
-import { openSettings } from "./settings";
+import { openSettings, registerSettingsOpener, mountSettingsPanel, disposeSettingsPanel } from "./settings";
 import { openTerminal, closeTerminal, isTerminalOpen, fitToGrid } from "./terminal";
 import { brand } from "./brand";
 import { WindowManager } from "./window-manager";
@@ -119,6 +119,22 @@ function chatPanelMount(fixedId?: string) {
 
 registerPanel("chat", () => chatPanelMount("chat")); // legacy saved layouts
 registerPanel("chat-tab", () => chatPanelMount());
+
+// Settings is a dock tab like everything else — one container paradigm.
+registerPanel("settings", () => ({
+  mount(host: HTMLElement) {
+    mountSettingsPanel(host);
+  },
+  dispose() {
+    disposeSettingsPanel();
+  },
+}));
+registerSettingsOpener(() => {
+  if (!wm.hasPanel("settings")) {
+    wm.addPanel({ id: "settings", component: "settings", title: "Settings" });
+  }
+  wm.focusPanel("settings");
+});
 
 /** Focus-or-open a chat tab standing in (connectionId, team). One tab per
  *  place via the panel id (focus-or-open); open the same place twice via the
@@ -221,19 +237,46 @@ registerPanel("viewer", () => ({
 // A team app (published from /data/{team}/apps or the shared everyone catalog)
 // rendered as an iframe — the desktop's counterpart to the webapp's team-apps
 // grid widget. Only 'iframe' apps render; other types aren't wired up yet.
-registerPanel("app", () => ({
-  mount(host: HTMLElement, params: Record<string, any>) {
-    const url = String(params.url || "");
-    if (!url) {
-      host.textContent = "This app has no URL to open.";
-      return;
-    }
-    const iframe = document.createElement("iframe");
-    iframe.className = "app-panel-iframe";
-    iframe.src = url.startsWith("http") ? url : `${activeChat().scope.connection.url}${url}`;
-    host.appendChild(iframe);
-  },
-}));
+registerPanel("app", () => {
+  let onMessage: ((ev: MessageEvent) => void) | null = null;
+  let themeObserver: MutationObserver | null = null;
+  return {
+    mount(host: HTMLElement, params: Record<string, any>) {
+      const url = String(params.url || "");
+      if (!url) {
+        host.textContent = "This app has no URL to open.";
+        return;
+      }
+      const iframe = document.createElement("iframe");
+      iframe.className = "app-panel-iframe";
+      iframe.src = url.startsWith("http") ? url : `${activeChat().scope.connection.url}${url}`;
+      host.appendChild(iframe);
+
+      // Hosted apps follow the app theme, and their window.open (swallowed by
+      // webviews) is forwarded as a lit-open-url message → system browser.
+      // Connector apps rely on this for their OAuth flows.
+      const postTheme = () => {
+        const theme = document.documentElement.getAttribute("data-theme") || "dark";
+        iframe.contentWindow?.postMessage({ type: "lit-theme", theme }, "*");
+      };
+      iframe.addEventListener("load", postTheme);
+      themeObserver = new MutationObserver(postTheme);
+      themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+      onMessage = (ev: MessageEvent) => {
+        if (ev.source === iframe.contentWindow && ev.data?.type === "lit-open-url") {
+          import("@tauri-apps/plugin-opener")
+            .then((m) => m.openUrl(ev.data.url))
+            .catch(() => window.open(ev.data.url, "_blank"));
+        }
+      };
+      window.addEventListener("message", onMessage);
+    },
+    dispose() {
+      if (onMessage) window.removeEventListener("message", onMessage);
+      themeObserver?.disconnect();
+    },
+  };
+});
 
 /** Open (or focus) a team app in its own panel. */
 function openApp(app: AppWidget): void {
@@ -890,10 +933,15 @@ async function init() {
   if (terminalClose) terminalClose.addEventListener("click", () => setTerminalOpen(false));
   window.addEventListener("resize", () => { if (isTerminalOpen()) fitToGrid(); });
 
-  activeChat().renderMessage({
-    role: "system",
-    content: "Starting LIT backend...",
-  });
+  // Stamp the template's boot state with the real brand + version and a
+  // truthful status line; the first real render replaces it wholesale.
+  const version = await import("@tauri-apps/api/app")
+    .then((m) => m.getVersion())
+    .catch(() => "");
+  document.querySelectorAll(".boot-brand-name").forEach((n) => (n.textContent = brand.displayName));
+  document.querySelectorAll(".boot-version").forEach((n) => (n.textContent = version ? ` v${version}` : ""));
+  document.querySelectorAll(".boot-text").forEach((n) => (n.textContent = "Starting the local backend…"));
+
   const connected = await startBackend();
   if (!connected) {
     setStatus("disconnected");
@@ -978,6 +1026,15 @@ function getCommands(): Command[] {
     },
   });
   cmds.push({ id: "manage-servers", label: "Manage Servers…", icon: "🌐", action: () => openSettings(() => loadInitialData()) });
+  cmds.push({
+    id: "reset-layout",
+    label: "Reset Window Layout",
+    icon: "🧹",
+    action: () => {
+      localStorage.removeItem(DOCK_LAYOUT_KEY);
+      window.location.reload();
+    },
+  });
 
   // Places: open (or focus) a chat tab standing in a (server, team) — any team
   // on any connected server. Pinning one of these to the toolbar (the palette's

@@ -278,9 +278,13 @@ body {
 
 .team-new-row {
   display: flex;
-  gap: 4px;
+  gap: 6px;
   padding: 4px;
+  align-items: stretch;
 }
+/* Uniform control heights in the row — the .wide margin-bottom otherwise makes
+   stretched inputs land at different heights */
+.team-new-row .settings-input { margin: 0; box-sizing: border-box; }
 
 .team-new-input {
   flex: 1;
@@ -604,6 +608,46 @@ body {
   line-height: 1.5;
   tab-size: 2;
 }
+
+/* Boot state — the app's first impression: quiet, centered, alive */
+.boot-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  height: 100%;
+  min-height: 320px;
+  text-align: center;
+}
+.boot-brand {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.boot-version { opacity: 0.45; font-weight: 400; font-size: 15px; }
+.boot-spinner {
+  width: 26px;
+  height: 26px;
+  border: 3px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: boot-spin 0.9s linear infinite;
+}
+@keyframes boot-spin { to { transform: rotate(360deg); } }
+.boot-text { font-size: 14px; opacity: 0.85; }
+.boot-hint { font-size: 12px; opacity: 0.5; }
+
+/* Agent form: heartbeat listening checkbox */
+.form-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.form-check input { accent-color: var(--accent); }
 
 /* Empty-channel onboarding card */
 .welcome-card {
@@ -2335,6 +2379,21 @@ kbd {
 .settings-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
 .settings-body { padding: 20px; overflow-y: auto; flex: 1; }
+
+/* Settings as a dock tab: full-height scroll, content centered at a readable
+   measure (the modal's width constraint, kept without the modal). */
+.settings-panel {
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+  background: var(--bg-primary);
+}
+.settings-panel .settings-body {
+  max-width: 780px;
+  width: 100%;
+  padding: 24px 32px 48px;
+}
 .settings-loading, .settings-empty { color: var(--text-muted); padding: 24px 4px; text-align: center; }
 .settings-empty p { margin: 2px 0; }
 .settings-empty .muted, .muted { color: var(--text-muted); }
@@ -2493,7 +2552,20 @@ kbd {
 .setup-section-title {
   font-size: 13px; font-weight: 600; color: var(--text-primary);
   margin: 0 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: baseline; gap: 10px;
 }
+/* Section-header status chip: the setup page reads as a checklist */
+.section-status { font-size: 12px; font-weight: 400; }
+.section-status.ok { color: #4caf50; }
+.section-status.ok::before { content: "● "; font-size: 9px; }
+.section-status.warn { color: #ff9800; }
+.section-status.warn::before { content: "● "; font-size: 9px; }
+/* Connection cards: status + actions cluster on the right */
+.conn-head-right { display: flex; align-items: center; gap: 8px; }
+
+/* Pricing model always visible: subscription (blue) vs metered (orange) */
+.cred-badge.mode-subscription { color: #61afef; background: rgba(97, 175, 239, 0.14); }
+.cred-badge.mode-api_key { color: #ff9800; background: rgba(255, 152, 0, 0.14); }
 
 /* "Connect your tools" iframe (google-workspace connector app) */
 .tools-app-frame {

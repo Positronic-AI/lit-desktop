@@ -122,6 +122,12 @@ export class WindowManager {
     this._suppressPersist = true;
     try {
       this._api.fromJSON(JSON.parse(raw));
+      // A restored layout can carry groups whose panels failed to recreate
+      // (e.g. a saved panel type mid-refactor). Empty groups are dead space —
+      // drop them so a bad save can't wedge the window arrangement.
+      for (const group of [...this._api.groups]) {
+        if (group.panels.length === 0) this._api.removeGroup(group);
+      }
       this._updateSingleTabHeaders();
       return true;
     } catch (e) {
