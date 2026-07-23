@@ -75,6 +75,61 @@ export async function hostFetch(input: RequestInfo | URL, init?: RequestInit): P
   return (await nativeFetchP)(input, init);
 }
 
+// ---- Native WebSocket (packaged app, remote servers) ----
+// Same webview limitation as fetch (see hostFetch): wss to remote hosts from
+// the tauri:// scheme can't be trusted. This is a DOM-WebSocket-compatible
+// shim over tauri-plugin-websocket, used only under Tauri for non-local URLs —
+// the local ws:// path stays on the webview's WebSocket, which is proven.
+class NativeWebSocketShim {
+  onopen: ((ev: unknown) => void) | null = null;
+  onmessage: ((ev: { data: string }) => void) | null = null;
+  onerror: ((ev: unknown) => void) | null = null;
+  onclose: ((ev: unknown) => void) | null = null;
+  readyState = 0; // CONNECTING
+  private inner: { send(d: string): Promise<unknown>; disconnect(): Promise<unknown> } | null = null;
+  private closedLocally = false;
+
+  constructor(url: string) {
+    import("@tauri-apps/plugin-websocket")
+      .then((m) => m.default.connect(url))
+      .then((ws) => {
+        if (this.closedLocally) { ws.disconnect().catch(() => {}); return; }
+        this.inner = ws;
+        this.readyState = 1; // OPEN
+        ws.addListener((msg: { type?: string; data?: unknown }) => {
+          if (msg.type === "Text" && typeof msg.data === "string") {
+            this.onmessage?.({ data: msg.data });
+          } else if (msg.type === "Close" || msg.type == null) {
+            // Server closed (the plugin emits a Close frame / null at stream end)
+            if (this.readyState !== 3) {
+              this.readyState = 3;
+              if (!this.closedLocally) this.onclose?.({});
+            }
+          }
+        });
+        this.onopen?.({});
+      })
+      .catch((e) => {
+        this.readyState = 3;
+        this.onerror?.(e);
+        if (!this.closedLocally) this.onclose?.({});
+      });
+  }
+
+  send(data: string): void { this.inner?.send(data).catch(() => {}); }
+
+  close(): void {
+    this.closedLocally = true;
+    this.readyState = 3;
+    const inner = this.inner;
+    this.inner = null;
+    inner?.disconnect().catch(() => {});
+    // DOM fires close asynchronously after close(); consumers already guard
+    // on channel/dispose state, so mirroring that is safe.
+    setTimeout(() => this.onclose?.({}), 0);
+  }
+}
+
 // ---- Connections (servers) ----
 // A Connection makes a host's addresses reachable (see docs/plans/address-model.md).
 // "Connection" always means a server connection — frontier-model credentials are
@@ -602,7 +657,11 @@ export function createChannelWebSocket(channelId: string, scope: Scope = activeS
   const params = new URLSearchParams();
   if (conn.token) params.set("token", conn.token);
   params.set("team", scope.team);
-  return new WebSocket(`${wsUrl}/mux/ws/channel/${channelId}?${params.toString()}`);
+  const full = `${wsUrl}/mux/ws/channel/${channelId}?${params.toString()}`;
+  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !full.startsWith("ws://127.0.0.1")) {
+    return new NativeWebSocketShim(full) as unknown as WebSocket;
+  }
+  return new WebSocket(full);
 }
 
 // --- Agent control APIs ---

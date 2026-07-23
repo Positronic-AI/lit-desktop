@@ -11,6 +11,7 @@
       "identifier": "http:default",
       "allow": [{ "url": "https://**" }, { "url": "http://**" }]
     },
+    "websocket:default",
     {
       "identifier": "shell:allow-spawn",
       "allow": [
