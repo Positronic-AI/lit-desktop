@@ -7,12 +7,14 @@ import {
   fetchApps,
   type AppWidget,
   readServerFile,
+  writeServerFile,
   searchChannelMessages,
   fetchTeams,
   createTeam,
   getConnections,
   getActiveConnection,
   activeScope,
+  type Scope,
   type TeamInfo,
 } from "./api";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -50,12 +52,35 @@ function activeChat(): ChatPanel {
   return first.value;
 }
 
+// External http(s) links anywhere in the app open in the system browser —
+// clicking one must never navigate the webview away from the app. Capture
+// phase so no inner handler (or the default navigation) runs first. When an
+// in-app browser exists it takes over here.
+document.addEventListener(
+  "click",
+  (e) => {
+    const a = (e.target as HTMLElement).closest?.("a[href]") as HTMLAnchorElement | null;
+    if (!a) return;
+    const href = a.getAttribute("href") || "";
+    if (!/^https?:\/\//i.test(href)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    import("@tauri-apps/plugin-opener")
+      .then((m) => m.openUrl(href))
+      .catch(() => window.open(href, "_blank"));
+  },
+  { capture: true },
+);
+
 /** Hooks every chat panel needs into app-level surfaces. */
 function wireChatHooks(p: ChatPanel): void {
   p.onOpenSearch = openSearch;
   p.onToggleTerminal = toggleTerminalPanel;
   p.onReload = () => loadInitialData();
   p.onImageClick = openLightbox;
+  // A path clicked in a message opens on the machine that message lives on —
+  // the panel's own scope, not whichever place happens to be focused.
+  p.onOpenFile = (path) => openViewer(path, p.scope);
 }
 
 // A chat tab: its own ChatPanel standing in (connectionId, team) — possibly a
@@ -116,21 +141,75 @@ function openChatTab(connectionId: string, team: string): void {
 }
 
 // The viewer panel renders a file's text beside the chat — markdown rendered,
-// other files syntax-highlighted in a code block. The first "see my work next to
-// the conversation" surface; a Monaco editor/diff comes later.
+// other files syntax-highlighted in a code block, with a plain-text edit mode
+// saved back through the same scope the file was opened from. A Monaco
+// editor/diff comes later.
 registerPanel("viewer", () => ({
   mount(host: HTMLElement, params: Record<string, any>) {
     const path = String(params.path || "");
+    // Resolve the scope the panel was opened with (survives layout restore via
+    // params). A vanished connection falls back to the active scope.
+    const conn = getConnections().find((c) => c.id === params.connectionId);
+    const scope: Scope = conn ? { connection: conn, team: String(params.team || "everyone") } : activeScope();
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "viewer-toolbar";
+    const pathLabel = document.createElement("span");
+    pathLabel.className = "viewer-path";
+    pathLabel.textContent = conn && conn.id !== "local" ? `${conn.name}:${path}` : path;
+    const editBtn = document.createElement("button");
+    editBtn.className = "viewer-btn";
+    editBtn.textContent = "Edit";
+    toolbar.append(pathLabel, editBtn);
+
     const body = document.createElement("div");
     body.className = "viewer-body";
     body.textContent = `Loading ${path}…`;
-    host.appendChild(body);
-    readServerFile(path)
+    host.append(toolbar, body);
+
+    let raw = "";
+    const renderView = () => {
+      const isMd = /\.(md|markdown)$/i.test(path);
+      const ext = (path.split(".").pop() || "").toLowerCase();
+      body.innerHTML = renderMarkdown(isMd ? raw : "```" + ext + "\n" + raw + "\n```");
+    };
+
+    const enterEdit = () => {
+      const ta = document.createElement("textarea");
+      ta.className = "viewer-edit";
+      ta.value = raw;
+      ta.spellcheck = false;
+      const save = async () => {
+        try {
+          await writeServerFile(path, ta.value, scope);
+          raw = ta.value;
+          exitEdit();
+        } catch (e: any) {
+          pathLabel.textContent = `Save failed: ${e?.message || e}`;
+        }
+      };
+      const exitEdit = () => {
+        editBtn.textContent = "Edit";
+        editBtn.onclick = enterEdit;
+        renderView();
+      };
+      ta.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+          e.preventDefault();
+          void save();
+        }
+      });
+      editBtn.textContent = "Save";
+      editBtn.onclick = () => void save();
+      body.replaceChildren(ta);
+      ta.focus();
+    };
+    editBtn.onclick = enterEdit;
+
+    readServerFile(path, scope)
       .then((content) => {
-        const isMd = /\.(md|markdown)$/i.test(path);
-        const ext = (path.split(".").pop() || "").toLowerCase();
-        const md = isMd ? content : "```" + ext + "\n" + content + "\n```";
-        body.innerHTML = renderMarkdown(md);
+        raw = content;
+        renderView();
       })
       .catch((e) => {
         body.classList.add("viewer-error");
@@ -587,15 +666,23 @@ function setupAppToolbar(): void {
   renderToolbarFavorites();
 }
 
-/** Open a file in a viewer panel beside the chat (focus it if already open). */
-function openViewer(path: string): void {
-  const id = `viewer:${path}`;
+/** Open a file in a viewer panel beside the chat (focus it if already open).
+ *  The scope pins which machine the path lives on; the same path on two
+ *  servers is two distinct panels. */
+function openViewer(path: string, scope: Scope = activeScope()): void {
+  const id = `viewer:${scope.connection.id}:${path}`;
   if (wm.hasPanel(id)) {
     wm.focusPanel(id);
     return;
   }
-  const title = path.split("/").pop() || path;
-  wm.addPanel({ id, component: "viewer", title, params: { path } });
+  const name = path.split("/").pop() || path;
+  const title = scope.connection.id === "local" ? name : `${name} · ${scope.connection.name}`;
+  wm.addPanel({
+    id,
+    component: "viewer",
+    title,
+    params: { path, connectionId: scope.connection.id, team: scope.team },
+  });
 }
 
 async function handleOpenFile(): Promise<void> {

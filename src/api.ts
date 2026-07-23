@@ -434,6 +434,20 @@ export async function readServerFile(path: string, scope: Scope = activeScope())
   return r.data ?? "";
 }
 
+/** Write a file's text via the backend (the mux commander file API). */
+export async function writeServerFile(path: string, content: string, scope: Scope = activeScope()): Promise<void> {
+  const r = await apiFetch<{ success: boolean; error?: string }>(
+    "/commander/write_file",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, content }),
+    },
+    scope,
+  );
+  if (!r.success) throw new Error(r.error || "Failed to write file");
+}
+
 export async function fetchAgents(scope: Scope = activeScope()): Promise<Agent[]> {
   const data = await apiFetch<{ agents: Agent[] }>(`/agents?team=${scope.team}`, undefined, scope);
   return data.agents;

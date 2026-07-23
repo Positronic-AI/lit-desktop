@@ -32,6 +32,7 @@ import {
   clearInterrupt,
   getInterrupt,
   fetchUsage,
+  fetchBackendStatus,
   cancelStream,
   uploadImage,
   authHeaders,
@@ -317,6 +318,7 @@ function renderToolCallEl(tool: ToolCall): HTMLDivElement {
       const paramEl = document.createElement("div");
       paramEl.className = "tool-param";
       paramEl.innerHTML = `<span class="param-key">${escapeHtml(param.key)}:</span> <span class="param-value">${escapeHtml(param.value)}</span>`;
+      linkifyFilePaths(paramEl);
       paramsSection.appendChild(paramEl);
     }
     details.appendChild(paramsSection);
@@ -329,6 +331,7 @@ function renderToolCallEl(tool: ToolCall): HTMLDivElement {
   resultContent.className = "tool-result-content";
   if (tool.result) {
     resultContent.innerHTML = `<pre>${escapeHtml(tool.result)}</pre>`;
+    linkifyFilePaths(resultContent, { includePre: true });
   } else {
     resultContent.innerHTML = "<em>No result</em>";
   }
@@ -406,6 +409,67 @@ function renderToolGroupEl(group: ToolGroup): HTMLDivElement {
   return el;
 }
 
+// Absolute unix paths (or ~/paths) with a file extension become clickable
+// buttons that open the file in the viewer panel — same behavior as the
+// webapp's markdown-extensions directive, same regex. Buttons carry the path
+// in data-path; the click is handled by ChatPanel's delegated listener so the
+// open routes through the panel's own scope (local vs remote server).
+const FILE_PATH_REGEX = /(?<![:/\w])((?:\/[\w.@+-]+)+\.\w+|~(?:\/[\w.@+-]+)+\.\w+)/g;
+
+export function linkifyFilePaths(container: HTMLElement, opts?: { includePre?: boolean }): void {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      const parent = node.parentElement;
+      if (!parent) return NodeFilter.FILTER_REJECT;
+      if (parent.closest(".md-path-btn") || parent.closest("a")) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      // Markdown code fences stay plain; tool results opt in via includePre.
+      if (!opts?.includePre && parent.closest("pre")) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      FILE_PATH_REGEX.lastIndex = 0;
+      return FILE_PATH_REGEX.test(node.textContent || "")
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT;
+    },
+  });
+
+  const textNodes: Text[] = [];
+  let node: Node | null;
+  while ((node = walker.nextNode())) textNodes.push(node as Text);
+
+  for (const textNode of textNodes) {
+    const text = textNode.textContent || "";
+    const parent = textNode.parentElement;
+    if (!parent) continue;
+
+    const frag = document.createDocumentFragment();
+    let lastEnd = 0;
+    let match: RegExpExecArray | null;
+    FILE_PATH_REGEX.lastIndex = 0;
+    while ((match = FILE_PATH_REGEX.exec(text)) !== null) {
+      if (match.index > lastEnd) frag.appendChild(document.createTextNode(text.slice(lastEnd, match.index)));
+      const btn = document.createElement("button");
+      btn.className = "md-path-btn";
+      btn.textContent = match[1];
+      btn.dataset.path = match[1];
+      btn.title = "Open file";
+      frag.appendChild(btn);
+      lastEnd = match.index + match[0].length;
+    }
+    if (lastEnd === 0) continue;
+    if (lastEnd < text.length) frag.appendChild(document.createTextNode(text.slice(lastEnd)));
+
+    // Replace a wrapping <code> entirely so the button isn't styled as code.
+    if (parent.tagName === "CODE" && parent.parentElement) {
+      parent.parentElement.replaceChild(frag, parent);
+    } else {
+      parent.replaceChild(frag, textNode);
+    }
+  }
+}
+
 function renderContentParts(parent: HTMLElement, parts: ContentPart[], role: string) {
   for (const part of parts) {
     if (part.type === "text") {
@@ -416,6 +480,7 @@ function renderContentParts(parent: HTMLElement, parts: ContentPart[], role: str
       } else {
         content.innerHTML = renderMarkdown(part.content || "");
       }
+      linkifyFilePaths(content);
       parent.appendChild(content);
     } else if (part.type === "tool-group" && part.toolGroup) {
       parent.appendChild(renderToolGroupEl(part.toolGroup));
@@ -644,6 +709,7 @@ export class ChatPanel {
   onReload: (() => void) | null = null;
   /** An image inside a message was clicked (main.ts opens the lightbox). */
   onImageClick: ((src: string) => void) | null = null;
+  onOpenFile: ((path: string) => void) | null = null;
 
   // --- Chat state (former main.ts module globals) ---
   currentChannel: Channel | null = null;
@@ -837,6 +903,11 @@ export class ChatPanel {
       const target = e.target as HTMLElement;
       if (target.tagName === "IMG" && target.closest(".message-content")) {
         this.onImageClick?.((target as HTMLImageElement).src);
+      }
+      const pathBtn = target.closest(".md-path-btn") as HTMLElement | null;
+      if (pathBtn?.dataset.path) {
+        e.preventDefault();
+        this.onOpenFile?.(pathBtn.dataset.path);
       }
     });
 
@@ -1557,6 +1628,68 @@ export class ChatPanel {
     }
   }
 
+  /** Empty-channel onboarding card. Adapts to what's actually wired up so a
+   *  fresh install tells the user the one thing they need next, instead of a
+   *  bare "type something" against an unknown void. */
+  private async renderWelcome(): Promise<void> {
+    const agent = this.currentAgent;
+    const card = document.createElement("div");
+    card.className = "welcome-card";
+
+    let authState: string | null = null;
+    if (agent) {
+      try {
+        const st = await fetchBackendStatus(agent.backend, undefined, this.scope);
+        authState = st.auth_status;
+      } catch {
+        authState = null;
+      }
+    }
+
+    const server = this.scope.connection.id === "local"
+      ? "this machine"
+      : this.scope.connection.name;
+    const title = `<div class="welcome-title">Welcome to ${escapeHtml(brand.displayName)}</div>`;
+
+    if (agent && authState === "authenticated") {
+      card.innerHTML =
+        title +
+        `<p><strong>${escapeHtml(agent.name)}</strong> is on duty in this channel — ` +
+        `${escapeHtml(agent.model)} on ${escapeHtml(server)}, signed in and ready. ` +
+        `It can run commands, read and edit files, and work alongside you here.</p>` +
+        `<p>Type below to say hello.</p>`;
+    } else if (agent) {
+      const why =
+        authState === "token_expired" ? "its AI sign-in has expired" :
+        authState === "not_installed" ? "no AI backend is installed yet" :
+        "no AI is signed in yet";
+      card.innerHTML =
+        title +
+        `<p><strong>${escapeHtml(agent.name)}</strong> is bound to this channel, but ${why}.</p>` +
+        `<p>Open Settings and add a credential under <em>Credentials</em>, then come back and say hello.</p>`;
+      const btn = document.createElement("button");
+      btn.className = "welcome-settings-btn";
+      btn.textContent = "Open Settings";
+      btn.addEventListener("click", () => openSettings(() => this.onReload?.()));
+      card.appendChild(btn);
+    } else {
+      card.innerHTML =
+        title +
+        `<p>This channel has no agent yet. Open Settings to create one and connect an AI credential.</p>`;
+      const btn = document.createElement("button");
+      btn.className = "welcome-settings-btn";
+      btn.textContent = "Open Settings";
+      btn.addEventListener("click", () => openSettings(() => this.onReload?.()));
+      card.appendChild(btn);
+    }
+
+    const hints = document.createElement("div");
+    hints.className = "welcome-hints";
+    hints.textContent = "⚙ credentials, agents & servers · >_ live terminal · 🔍 search";
+    card.appendChild(hints);
+    this.messagesEl.appendChild(card);
+  }
+
   private async loadChannelModelOverride(channelId: string, agentId: string): Promise<void> {
     try {
       this.channelModelOverride = await getChannelModelOverride(channelId, agentId, this.scope);
@@ -1799,7 +1932,7 @@ export class ChatPanel {
       const messages = await fetchChannelMessages(channel.id, 50, this.scope);
 
       if (messages.length === 0) {
-        this.renderMessage({ role: "system", content: "No messages yet. Type something to start the conversation." });
+        void this.renderWelcome();
       } else {
         for (const msg of messages) {
           this.knownMessageIds.add(msg.id);
