@@ -2575,3 +2575,38 @@ kbd {
   border-radius: 8px;
   background: var(--bg-primary);
 }
+
+/* Interactive question card (AskUserQuestion / relayed CLI dialogs) */
+.ask-card {
+  border: 1px solid var(--accent, #61afef);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 8px 0;
+  background: var(--bg-secondary);
+}
+.ask-header {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.65;
+  margin-bottom: 4px;
+}
+.ask-question-text { font-weight: 600; margin-bottom: 10px; white-space: pre-wrap; }
+.ask-options { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.ask-option-btn {
+  font: inherit;
+  text-align: left;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.ask-option-btn:hover { border-color: var(--accent, #61afef); }
+.ask-card.answered .ask-option-btn { opacity: 0.5; cursor: default; pointer-events: none; }
+.ask-card.answered .ask-option-btn.chosen {
+  opacity: 1;
+  border-color: var(--accent, #61afef);
+  background: rgba(97, 175, 239, 0.14);
+}

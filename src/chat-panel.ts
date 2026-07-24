@@ -85,11 +85,24 @@ interface ToolGroup {
   tools: ToolCall[];
 }
 
+interface AskOption {
+  label: string;
+  description?: string | null;
+}
+
+interface AskQuestion {
+  header?: string;
+  question: string;
+  options: AskOption[];
+  multiSelect?: boolean;
+}
+
 interface ContentPart {
-  type: "text" | "tool" | "tool-group" | "thinking";
+  type: "text" | "tool" | "tool-group" | "thinking" | "ask";
   content?: string;
   tool?: ToolCall;
   toolGroup?: ToolGroup;
+  ask?: AskQuestion[];
 }
 
 interface ParsedContent {
@@ -225,22 +238,38 @@ function parseMessageContent(raw: string): ParsedContent {
           const toolName: string = data.name || "Unknown";
           const toolInput: Record<string, unknown> = data.input || {};
 
-          const params: { key: string; value: string }[] = [];
-          for (const [key, value] of Object.entries(toolInput)) {
-            params.push({
-              key,
-              value: typeof value === "string" ? value : JSON.stringify(value),
-            });
-          }
+          if (toolName === "AskUserQuestion" && (toolInput as any).questions) {
+            // Interactive question card (agent AskUserQuestion, or a CLI modal
+            // dialog the mux relays in the same shape) — not a collapsed tool row.
+            const rawQ = (toolInput as any).questions;
+            const questions: AskQuestion[] = (Array.isArray(rawQ) ? rawQ : [rawQ]).map((q: any) => ({
+              header: q.header,
+              question: q.question,
+              options: (q.options || []).map((o: any) => ({
+                label: o.label,
+                description: o.description,
+              })),
+              multiSelect: q.multiSelect,
+            }));
+            rawParts.push({ type: "ask", ask: questions });
+          } else {
+            const params: { key: string; value: string }[] = [];
+            for (const [key, value] of Object.entries(toolInput)) {
+              params.push({
+                key,
+                value: typeof value === "string" ? value : JSON.stringify(value),
+              });
+            }
 
-          const tool: ToolCall = {
-            name: toolName,
-            iconSvg: getToolIcon(toolName),
-            paramPreview: getParamPreview(toolName, toolInput),
-            params,
-          };
-          lastToolCall = tool;
-          rawParts.push({ type: "tool", tool });
+            const tool: ToolCall = {
+              name: toolName,
+              iconSvg: getToolIcon(toolName),
+              paramPreview: getParamPreview(toolName, toolInput),
+              params,
+            };
+            lastToolCall = tool;
+            rawParts.push({ type: "tool", tool });
+          }
         } catch {
           // malformed JSON — skip
         }
@@ -264,6 +293,20 @@ function parseMessageContent(raw: string): ParsedContent {
       if (thinkingContent) rawParts.push({ type: "thinking", content: thinkingContent });
       currentPos = thinkingEnd + "[/THINKING]".length;
     }
+  }
+
+  // One card per question: a turn can transiently carry the same AskUserQuestion
+  // twice — the mux-synthesized card plus the reflow's own frame once the
+  // answered call enters the transcript. Keep the LAST occurrence (canonical
+  // tool input).
+  const lastAskIdx = new Map<string, number>();
+  rawParts.forEach((p, idx) => {
+    if (p.type === "ask" && p.ask) lastAskIdx.set(p.ask.map((q) => q.question).join("\n"), idx);
+  });
+  for (let idx = rawParts.length - 1; idx >= 0; idx--) {
+    const p = rawParts[idx];
+    if (p.type !== "ask" || !p.ask) continue;
+    if (lastAskIdx.get(p.ask.map((q) => q.question).join("\n")) !== idx) rawParts.splice(idx, 1);
   }
 
   // Second pass: group consecutive tool parts into tool-groups
@@ -492,8 +535,54 @@ function renderContentParts(parent: HTMLElement, parts: ContentPart[], role: str
       el.className = "thinking-content";
       el.innerHTML = renderMarkdown(part.content || "");
       parent.appendChild(el);
+    } else if (part.type === "ask" && part.ask) {
+      parent.appendChild(renderAskCardEl(part.ask));
     }
   }
+}
+
+/** Chosen answers by question text — consulted at render time so the selected
+ *  state survives streaming re-renders (renderStreamingText wipes the DOM every
+ *  frame) and reloads (populated from persisted dialog-answer messages). */
+const cardAnswers = new Map<string, string>();
+
+/** Interactive question card: the question with its options as buttons.
+ *  Clicks are delegated (`.ask-option-btn`) — the panel posts the chosen label
+ *  tagged `source: dialog-answer`; the mux routes it to the waiting question.
+ *  No chat bubble: the card itself renders the selection. */
+function renderAskCardEl(questions: AskQuestion[]): HTMLDivElement {
+  const el = document.createElement("div");
+  el.className = "ask-card";
+  for (const q of questions) {
+    const answer = cardAnswers.get(q.question || "");
+    const qEl = document.createElement("div");
+    qEl.className = "ask-question";
+    if (q.header) {
+      const head = document.createElement("div");
+      head.className = "ask-header";
+      head.textContent = q.header;
+      qEl.appendChild(head);
+    }
+    const title = document.createElement("div");
+    title.className = "ask-question-text";
+    title.textContent = q.question || "";
+    qEl.appendChild(title);
+    const opts = document.createElement("div");
+    opts.className = "ask-options";
+    for (const o of q.options || []) {
+      const btn = document.createElement("button");
+      btn.className = "ask-option-btn";
+      btn.dataset.answer = o.label;
+      btn.textContent = o.label;
+      if (o.description) btn.title = o.description;
+      if (answer === o.label) btn.classList.add("chosen");
+      opts.appendChild(btn);
+    }
+    if (answer) el.classList.add("answered");
+    qEl.appendChild(opts);
+    el.appendChild(qEl);
+  }
+  return el;
 }
 
 // --- Context menu (kebab) ---
@@ -910,6 +999,21 @@ export class ChatPanel {
         e.preventDefault();
         this.onOpenFile?.(pathBtn.dataset.path);
       }
+      // Question-card answer: post the chosen label tagged dialog-answer; the
+      // mux matches it against the pending question and answers the dialog.
+      // Recording by question text keeps the selection through streaming
+      // re-renders — no chat bubble, the card renders the choice.
+      const askBtn = target.closest(".ask-option-btn") as HTMLElement | null;
+      if (askBtn?.dataset.answer) {
+        const card = askBtn.closest(".ask-card");
+        if (card && !card.classList.contains("answered")) {
+          card.classList.add("answered");
+          askBtn.classList.add("chosen");
+          const qText = askBtn.closest(".ask-question")?.querySelector(".ask-question-text")?.textContent || "";
+          if (qText) cardAnswers.set(qText, askBtn.dataset.answer);
+          this.sendAnswer(askBtn.dataset.answer);
+        }
+      }
     });
 
     // Send
@@ -1294,6 +1398,12 @@ export class ChatPanel {
 
   renderMessage(msg: RenderableMessage): HTMLElement | null {
     if (!this.root) return null; // not mounted (never the case in practice)
+    // Dialog answers render inside the question card (selected state), not as
+    // bubbles. Single interception covers history load and both WS paths.
+    if ((msg.metadata as any)?.source === "dialog-answer") {
+      this.applyDialogAnswer(msg.content);
+      return null;
+    }
     const parsed = parseMessageContent(msg.content);
     if (!hasVisibleContent(parsed)) return null;
 
@@ -1351,11 +1461,32 @@ export class ChatPanel {
     return el;
   }
 
+  /** Mark the question card a persisted dialog answer belongs to: the nearest
+   *  preceding card (scanning back) that actually has the label as an option.
+   *  Records into cardAnswers so later re-renders keep the selection. */
+  private applyDialogAnswer(content: string): void {
+    const label = (content || "").replace(/<context>[\s\S]*?<\/context>\s*/, "").trim();
+    if (!label) return;
+    const cards = this.messagesEl.querySelectorAll(".ask-card");
+    for (let i = cards.length - 1; i >= 0; i--) {
+      const card = cards[i];
+      const btn = Array.from(card.querySelectorAll<HTMLElement>(".ask-option-btn"))
+        .find((b) => b.dataset.answer === label);
+      if (!btn) continue;
+      card.classList.add("answered");
+      btn.classList.add("chosen");
+      const qText = btn.closest(".ask-question")?.querySelector(".ask-question-text")?.textContent || "";
+      if (qText) cardAnswers.set(qText, label);
+      return;
+    }
+  }
+
   clearMessages(): void {
     if (!this.root) return; // not mounted (never the case in practice)
     this.messagesEl.innerHTML = "";
     this.knownMessageIds.clear();
     this.userIsScrolledUp = false;
+    cardAnswers.clear();
     this.updateScrollButton();
   }
 
@@ -2335,6 +2466,17 @@ export class ChatPanel {
 
     try {
       await postChannelMessage(this.currentChannel.id, content, this.scope);
+    } catch (err) {
+      this.renderMessage({ role: "system", content: `Failed to send: ${err}` });
+    }
+  }
+
+  /** Post a question-card answer tagged `source: dialog-answer`. No chat
+   *  bubble — the card itself renders the selection (chosen/answered state). */
+  private async sendAnswer(answer: string): Promise<void> {
+    if (!this.currentChannel) return;
+    try {
+      await postChannelMessage(this.currentChannel.id, answer, this.scope, "dialog-answer");
     } catch (err) {
       this.renderMessage({ role: "system", content: `Failed to send: ${err}` });
     }

@@ -579,11 +579,12 @@ export async function postChannelMessage(
   channelId: string,
   content: string,
   scope: Scope = activeScope(),
+  source?: string,
 ): Promise<void> {
   await apiFetch(`/channels/${channelId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content, team: scope.team }),
+    body: JSON.stringify({ content, team: scope.team, ...(source ? { source } : {}) }),
   }, scope);
 }
 
