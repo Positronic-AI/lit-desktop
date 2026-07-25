@@ -2610,3 +2610,57 @@ kbd {
   border-color: var(--accent, #61afef);
   background: rgba(97, 175, 239, 0.14);
 }
+
+/* Pre-emptive auth banner (expired/expiring Claude login) */
+.auth-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 12px 6px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.auth-banner.warn {
+  background: color-mix(in srgb, #e5c07b 14%, transparent);
+  border: 1px solid color-mix(in srgb, #e5c07b 45%, transparent);
+}
+.auth-banner.error {
+  background: color-mix(in srgb, #e06c75 14%, transparent);
+  border: 1px solid color-mix(in srgb, #e06c75 45%, transparent);
+}
+.auth-banner-text { flex: 1; }
+.auth-banner-btn {
+  font: inherit;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--accent, #61afef);
+  background: transparent;
+  color: var(--fg-primary, inherit);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.auth-banner-btn:hover { background: color-mix(in srgb, var(--accent, #61afef) 15%, transparent); }
+
+/* In-chat auth card (expired/expiring Claude login → inline OAuth flow) */
+.auth-card {
+  margin: 10px 4px 4px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.auth-card.warn {
+  background: color-mix(in srgb, #e5c07b 12%, transparent);
+  border: 1px solid color-mix(in srgb, #e5c07b 40%, transparent);
+}
+.auth-card.error {
+  background: color-mix(in srgb, #e06c75 12%, transparent);
+  border: 1px solid color-mix(in srgb, #e06c75 40%, transparent);
+}
+.auth-card.ok {
+  background: color-mix(in srgb, #98c379 12%, transparent);
+  border: 1px solid color-mix(in srgb, #98c379 40%, transparent);
+}
+.auth-card.expanded { border-color: var(--accent, #61afef); }
+.auth-card-row { display: flex; align-items: center; gap: 10px; }
+.auth-card-text { flex: 1; }

@@ -34,6 +34,8 @@ import {
   fetchUsage,
   fetchBackendStatus,
   getAgent,
+  listCredentials,
+  type Credential,
   cancelStream,
   uploadImage,
   authHeaders,
@@ -46,7 +48,7 @@ import {
 } from "./api";
 import { open } from "@tauri-apps/plugin-dialog";
 import { renderMarkdown } from "./markdown";
-import { openSettings } from "./settings";
+import { openSettings, runOAuth } from "./settings";
 import { openTerminal, isTerminalOpen, fitToGrid } from "./terminal";
 import { brand } from "./brand";
 
@@ -804,6 +806,7 @@ export class ChatPanel {
   // --- Chat state (former main.ts module globals) ---
   currentChannel: Channel | null = null;
   currentAgent: Agent | null = null;
+  private authBannerEl: HTMLElement | null = null;
   // Per-(channel, currentAgent) model override — null means "follow the agent's default".
   // Reloaded whenever the open channel or its bound agent changes.
   private channelModelOverride: string | null = null;
@@ -1451,6 +1454,8 @@ export class ChatPanel {
     }
 
     this.messagesEl.appendChild(el);
+    // Keep the auth card pinned below the newest message (like streamingEl).
+    if (this.authBannerEl) this.messagesEl.appendChild(this.authBannerEl);
 
     if (!this.userIsScrolledUp) {
       this.scrollToBottom();
@@ -1855,6 +1860,7 @@ export class ChatPanel {
     this.currentAgent = agent;
     localStorage.setItem("lit-desktop-agent", agent.id);
     await this.loadAgentThrottle(agent);
+    void this.checkAgentAuth();
 
     if (this.currentChannel) {
       try {
@@ -1869,6 +1875,102 @@ export class ChatPanel {
 
     this.renderAgentTabs();
     this.renderAgentInfo();
+  }
+
+  /** Pre-emptive credential check: verify the agent's Claude login BEFORE the
+   *  user types — an expired refresh token means every message will bounce with
+   *  "Login expired", so surface it as a banner with a one-click path to the
+   *  terminal /login flow instead. Best-effort: never blocks chat. */
+  private async checkAgentAuth(): Promise<void> {
+    const agent = this.currentAgent;
+    this.renderAuthBanner(null);
+    if (!agent) return;
+    const backend = (agent.backend || "").toLowerCase();
+    if (backend !== "claude-interactive" && backend !== "claude-cli") return;
+    try {
+      const full = await getAgent(agent.id, this.scope);
+      const status = await fetchBackendStatus(backend, full?.credentials_id || undefined, this.scope);
+      if (this.currentAgent?.id !== agent.id) return; // user switched agents mid-check
+      if (status.auth_status === "token_expired") {
+        this.renderAuthBanner({
+          kind: "error",
+          text: "Claude login expired — re-authenticate to reconnect this agent.",
+        });
+      } else if (status.warning) {
+        this.renderAuthBanner({ kind: "warn", text: status.warning });
+      }
+    } catch {
+      // Status is advisory only — an unreachable check must never block chat.
+    }
+  }
+
+  /** The auth state renders as a CARD IN THE CHAT AREA (not a strip above the
+   *  composer) — clicking Re-authenticate expands the OAuth flow inline right
+   *  there, using the conversation's real estate. Success clears the card. */
+  private renderAuthBanner(banner: { kind: "warn" | "error"; text: string } | null): void {
+    this.authBannerEl?.remove();
+    this.authBannerEl = null;
+    if (!banner) return;
+    const card = document.createElement("div");
+    card.className = `auth-card ${banner.kind}`;
+    const row = document.createElement("div");
+    row.className = "auth-card-row";
+    const span = document.createElement("span");
+    span.className = "auth-card-text";
+    span.textContent = banner.text;
+    row.appendChild(span);
+    if (banner.kind === "error") {
+      const btn = document.createElement("button");
+      btn.className = "auth-banner-btn";
+      btn.textContent = "Re-authenticate";
+      btn.addEventListener("click", () => void this.beginInlineReauth(card));
+      row.appendChild(btn);
+    }
+    card.appendChild(row);
+    this.messagesEl.appendChild(card);
+    this.authBannerEl = card;
+    this.scrollToBottom();
+  }
+
+  /** Expand the in-chat auth card into the live OAuth flow (same runOAuth the
+   *  settings screen uses). In-app authentication — never a terminal. */
+  private async beginInlineReauth(card: HTMLElement): Promise<void> {
+    card.innerHTML = "";
+    card.classList.add("expanded");
+    const host = document.createElement("div");
+    host.textContent = "Starting sign-in…";
+    card.appendChild(host);
+    try {
+      const agent = this.currentAgent;
+      const full = agent ? await getAgent(agent.id, this.scope) : null;
+      const creds = await listCredentials(this.scope.team, this.scope);
+      const cred: Credential | undefined =
+        creds.find((c) => c.id && c.id === full?.credentials_id) ||
+        creds.find((c) => c.vendor === "anthropic" && c.is_default) ||
+        creds.find((c) => c.vendor === "anthropic");
+      if (!cred) {
+        host.textContent = "No Claude credential found — add one in Settings.";
+        return;
+      }
+      host.textContent = "";
+      await runOAuth(
+        host,
+        cred,
+        () => {
+          card.innerHTML = "";
+          card.className = "auth-card ok";
+          card.textContent = "✓ Re-authenticated — this agent is reconnected.";
+          setTimeout(() => {
+            card.remove();
+            if (this.authBannerEl === card) this.authBannerEl = null;
+          }, 5000);
+        },
+        () => void this.checkAgentAuth(), // cancel → back to the collapsed card
+      );
+      this.scrollToBottom();
+    } catch {
+      host.textContent = "Could not start sign-in — try again from Settings.";
+    }
   }
 
   private async loadChannelAgent(channelId: string): Promise<void> {
@@ -2062,6 +2164,7 @@ export class ChatPanel {
     }
 
     await this.loadChannelAgent(channel.id);
+    void this.checkAgentAuth();
 
     try {
       const messages = await fetchChannelMessages(channel.id, 50, this.scope);

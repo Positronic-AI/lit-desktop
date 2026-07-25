@@ -632,8 +632,11 @@ function openCreateWizard(): void {
   render();
 }
 
-// OAuth paste-code / device flow, rendered into `host`.
-async function runOAuth(host: HTMLElement, c: Credential, done?: () => void): Promise<void> {
+// OAuth paste-code / device flow, rendered into `host`. Exported so the chat
+// panel's inline re-auth card can run the exact same flow in the chat area.
+// `onCancel` lets non-settings hosts recover their own UI (default: re-render
+// the settings setup screen, the original in-settings behavior).
+export async function runOAuth(host: HTMLElement, c: Credential, done?: () => void, onCancel?: () => void): Promise<void> {
   const backend = backendForVendorMode(c.vendor, c.mode);
   host.innerHTML = "";
   host.appendChild(el("div", "cred-detail-line muted", "Starting sign-in…"));
@@ -691,7 +694,7 @@ async function runOAuth(host: HTMLElement, c: Credential, done?: () => void): Pr
     submit.setAttribute("disabled", "true");
     try {
       const r = await submitOAuthCode(backend, session!.session_id, codeInput.value.trim());
-      if (r.status === "authenticated" || !r.error) { if (done) done(); else renderSetup(); }
+      if (r.status === "authenticated" || !r.error) { if (done) done(); else (onCancel || renderSetup)(); }
       else throw new Error(r.error || "failed");
     } catch {
       submit.textContent = "Submit code";
@@ -701,7 +704,7 @@ async function runOAuth(host: HTMLElement, c: Credential, done?: () => void): Pr
     }
   });
   const cancel = el("button", "settings-mini-btn ghost", "Cancel");
-  cancel.addEventListener("click", () => { cancelOAuth(backend, session!.session_id); renderSetup(); });
+  cancel.addEventListener("click", () => { cancelOAuth(backend, session!.session_id); (onCancel || renderSetup)(); });
   box.append(submit, err, cancel);
   host.appendChild(box);
 }
