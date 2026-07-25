@@ -23,6 +23,7 @@ import {
   fetchChannelMessages,
   postChannelMessage,
   createRemoteAttachWebSocket,
+  createChannelWebSocket,
   type Connection,
   type Scope,
 } from "./api";
@@ -146,6 +147,7 @@ class AttachPipe {
       ws.onclose = () => {
         if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
         this.ws = null;
+        closeStreamBridgesForPipe(ws);
         console.warn(`[remote-access] pipe to ${conn.name} closed — retrying in ${this.backoffMs / 1000}s`);
         this.scheduleReconnect();
       };
@@ -198,12 +200,65 @@ async function handleRpcFrame(ws: WebSocket, frame: { id: string; op?: string; p
         result = { sent: true };
         break;
       }
+      case "stream.subscribe": {
+        const sub = String(params.sub || "");
+        if (!sub) throw new Error("missing sub id");
+        openStreamBridge(ws, sub, String(params.channel || ""), String(params.team || "local"));
+        result = { subscribed: true };
+        break;
+      }
+      case "stream.unsubscribe": {
+        closeStreamBridge(String(params.sub || ""));
+        result = { unsubscribed: true };
+        break;
+      }
       default:
         throw new Error(`unknown op: ${frame.op}`);
     }
     reply({ result });
   } catch (e) {
     reply({ error: String((e as any)?.message ?? e) });
+  }
+}
+
+/** Live stream bridges: the server subscribed a portal session to one of our
+ *  channels; we open our own LOCAL channel WS and forward every event up the
+ *  pipe as `{type:"ev", sub, data}` frames. Closed on unsubscribe, pipe
+ *  death, or local WS close. */
+const streamBridges = new Map<string, { local: WebSocket; pipe: WebSocket }>();
+
+function openStreamBridge(pipe: WebSocket, sub: string, channelId: string, team: string): void {
+  closeStreamBridge(sub);
+  const local = createChannelWebSocket(channelId, localScope(team));
+  local.onmessage = (ev) => {
+    if (pipe.readyState !== WebSocket.OPEN) { closeStreamBridge(sub); return; }
+    try {
+      pipe.send(JSON.stringify({ type: "ev", sub, data: JSON.parse(ev.data) }));
+    } catch { /* unparseable local frame — skip */ }
+  };
+  local.onclose = () => {
+    // Local backend closed the WS (restart etc.) — tell the portal.
+    if (pipe.readyState === WebSocket.OPEN) {
+      pipe.send(JSON.stringify({ type: "ev", sub, data: { type: "stream_bridge_closed" } }));
+    }
+    streamBridges.delete(sub);
+  };
+  streamBridges.set(sub, { local, pipe });
+  console.log(`[remote-access] stream bridge open: sub=${sub} channel=${channelId}`);
+}
+
+function closeStreamBridge(sub: string): void {
+  const bridge = streamBridges.get(sub);
+  if (!bridge) return;
+  streamBridges.delete(sub);
+  bridge.local.onclose = null;
+  bridge.local.close();
+  console.log(`[remote-access] stream bridge closed: sub=${sub}`);
+}
+
+function closeStreamBridgesForPipe(pipe: WebSocket): void {
+  for (const [sub, bridge] of streamBridges) {
+    if (bridge.pipe === pipe) closeStreamBridge(sub);
   }
 }
 
