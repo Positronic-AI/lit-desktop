@@ -19,8 +19,10 @@ import {
   saveConnection,
   ensureFreshToken,
   fetchTeams,
+  fetchChannels,
   createRemoteAttachWebSocket,
   type Connection,
+  type Scope,
 } from "./api";
 import { brand } from "./brand";
 
@@ -134,8 +136,9 @@ class AttachPipe {
           const frame = JSON.parse(ev.data);
           if (frame.type === "attached") {
             console.log(`[remote-access] attached to ${conn.name} as ${frame.device_id}`);
+          } else if (frame.type === "rpc" && frame.id) {
+            void handleRpcFrame(ws, frame);
           }
-          // Later slices: RPC request frames handled here (enumerated ops only).
         } catch { /* ignore malformed frames */ }
       };
       ws.onclose = () => {
@@ -149,6 +152,38 @@ class AttachPipe {
       console.warn(`[remote-access] could not open pipe to ${conn.name}:`, e);
       this.scheduleReconnect();
     }
+  }
+}
+
+/** RPC adapter — the server proxies portal requests over the pipe as
+ *  `{type:"rpc", id, op, params}` frames. Each op is a thin call against the
+ *  LOCAL backend; the op set is an allow-list on BOTH ends (the desktop does
+ *  not trust the server blindly either). Anything unknown returns an error. */
+function localScope(team: string): Scope {
+  const local = getConnections().find((c) => c.id === "local");
+  if (!local) throw new Error("no local connection");
+  return { connection: local, team };
+}
+
+async function handleRpcFrame(ws: WebSocket, frame: { id: string; op?: string; params?: any }): Promise<void> {
+  const reply = (body: object) =>
+    ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "result", id: frame.id, ...body }));
+  try {
+    const params = frame.params || {};
+    let result: unknown;
+    switch (frame.op) {
+      case "teams.list":
+        result = await fetchTeams(localScope("local"));
+        break;
+      case "channels.list":
+        result = await fetchChannels(localScope(String(params.team || "local")));
+        break;
+      default:
+        throw new Error(`unknown op: ${frame.op}`);
+    }
+    reply({ result });
+  } catch (e) {
+    reply({ error: String((e as any)?.message ?? e) });
   }
 }
 
