@@ -20,6 +20,8 @@ import {
   ensureFreshToken,
   fetchTeams,
   fetchChannels,
+  fetchChannelMessages,
+  postChannelMessage,
   createRemoteAttachWebSocket,
   type Connection,
   type Scope,
@@ -178,6 +180,24 @@ async function handleRpcFrame(ws: WebSocket, frame: { id: string; op?: string; p
       case "channels.list":
         result = await fetchChannels(localScope(String(params.team || "local")));
         break;
+      case "messages.page":
+        result = await fetchChannelMessages(
+          String(params.channel || ""),
+          Math.min(Number(params.limit) || 50, 100),
+          localScope(String(params.team || "local")),
+        );
+        break;
+      case "messages.send": {
+        const content = String(params.content || "").trim();
+        if (!content) throw new Error("empty message");
+        await postChannelMessage(
+          String(params.channel || ""),
+          content,
+          localScope(String(params.team || "local")),
+        );
+        result = { sent: true };
+        break;
+      }
       default:
         throw new Error(`unknown op: ${frame.op}`);
     }
