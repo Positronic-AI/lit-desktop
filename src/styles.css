@@ -2664,3 +2664,14 @@ kbd {
 .auth-card.expanded { border-color: var(--accent, #61afef); }
 .auth-card-row { display: flex; align-items: center; gap: 10px; }
 .auth-card-text { flex: 1; }
+
+/* Remote access toggle on connection cards (Presence v1) */
+.conn-remote-row {
+  padding: 8px 2px 2px;
+  border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+  margin-top: 8px;
+}
+.conn-remote-label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text-secondary); cursor: pointer;
+}

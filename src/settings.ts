@@ -13,6 +13,7 @@ import {
   type Credential, type Vendor, type CredMode, type FullAgent,
   type BackendModel, type Connection,
 } from "./api";
+import { setRemoteAccess } from "./remote-access";
 
 interface VendorMeta {
   id: Vendor;
@@ -249,6 +250,23 @@ function renderServers(): void {
     }
     head.append(left, right);
     card.appendChild(head);
+    // Presence v1: offer this desktop to the server's web portal. Only
+    // meaningful on signed-in keycloak connections (the pipe reuses that
+    // identity). The desktop dials out; toggling off closes the pipe now.
+    if (c.id !== "local" && c.auth === "keycloak" && c.refreshToken && signedInUser(c)) {
+      const raRow = el("div", "conn-remote-row");
+      const raLabel = el("label", "conn-remote-label");
+      const raBox = document.createElement("input");
+      raBox.type = "checkbox";
+      raBox.checked = !!c.remoteAccess;
+      raBox.addEventListener("change", () => {
+        setRemoteAccess(c.id, raBox.checked);
+      });
+      raLabel.append(raBox, document.createTextNode(
+        ` Remote access — let me open this desktop's channels from ${c.name}'s web portal`));
+      raRow.appendChild(raLabel);
+      card.appendChild(raRow);
+    }
     list.appendChild(card);
   }
   serversRoot.appendChild(list);

@@ -154,6 +154,10 @@ export interface Connection {
   token?: string;
   refreshToken?: string;
   tokenExpiresAt?: number; // unix seconds
+  /** Presence v1: this desktop offers remote access via this server (the
+   *  desktop dials OUT and holds the pipe; off by default, instantly
+   *  revocable by closing it). */
+  remoteAccess?: boolean;
 }
 
 // ---- Scope ----
@@ -308,7 +312,7 @@ export function signedInUser(conn: Connection): string | null {
 
 /** Refresh the access token if it's missing or expiring within 30s. A dead
  *  refresh token (SSO session ended) clears auth so the UI shows Sign in again. */
-async function ensureFreshToken(conn: Connection): Promise<void> {
+export async function ensureFreshToken(conn: Connection): Promise<void> {
   if (conn.auth !== "keycloak" || !conn.refreshToken) return;
   const now = Math.floor(Date.now() / 1000);
   if (conn.token && conn.tokenExpiresAt && conn.tokenExpiresAt - now > 30) return;
@@ -678,6 +682,19 @@ export function createChannelWebSocket(channelId: string, scope: Scope = activeS
   if (conn.token) params.set("token", conn.token);
   params.set("team", scope.team);
   const full = `${wsUrl}/mux/ws/channel/${channelId}?${params.toString()}`;
+  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !full.startsWith("ws://127.0.0.1")) {
+    return new NativeWebSocketShim(full) as unknown as WebSocket;
+  }
+  return new WebSocket(full);
+}
+
+/** Presence v1: the attach pipe's socket. Same native-shim routing as the
+ *  channel WS — the Tauri webview cannot open remote WebSockets directly. */
+export function createRemoteAttachWebSocket(conn: Connection): WebSocket {
+  const wsUrl = conn.url.replace(/^http/, "ws");
+  const params = new URLSearchParams();
+  if (conn.token) params.set("token", conn.token);
+  const full = `${wsUrl}/mux/ws/remote/attach?${params.toString()}`;
   if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !full.startsWith("ws://127.0.0.1")) {
     return new NativeWebSocketShim(full) as unknown as WebSocket;
   }

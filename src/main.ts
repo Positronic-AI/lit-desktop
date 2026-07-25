@@ -28,6 +28,7 @@ import { WindowManager } from "./window-manager";
 import { registerPanel } from "./panel-host";
 import { mountGraphView } from "./graph-view";
 import { ChatPanel, escapeHtml } from "./chat-panel";
+import { syncRemoteAccessPipes } from "./remote-access";
 import "dockview-core/dist/styles/dockview.css";
 
 // --- Docking shell (Step 1: chat becomes a dockview panel) ---
@@ -984,6 +985,8 @@ async function loadInitialData() {
     .catch(() => { appsCache = []; });
   // Place catalog for "Open chat tab: …" commands and starred places.
   refreshPlaceCatalog();
+  // Presence v1: (re)establish attach pipes for remote-access-enabled servers.
+  syncRemoteAccessPipes();
   // Every open place tab (re)loads — restored tabs get their first real load
   // here, after the backend is up.
   await Promise.all([...chatPanels.values()].map((p) => p.loadInitialData()));
