@@ -28,6 +28,11 @@ pkill -f "node_modules/.bin/vite"            2>/dev/null || true
 # bridge match is scoped to $BASE/run so it can never touch another instance.
 pkill -f "lit serve --api-only --host 127.0.0.1 --port 5000" 2>/dev/null || true
 pkill -f "$BASE/run" 2>/dev/null || true
+# Reap watcher orphans from dead backends (stimulus/event-signal inotifywait
+# leak): they accumulate until inotify instance exhaustion — tauri dev then
+# dies with EMFILE "Too many open files" (2026-07-25, 81 orphans deep).
+pkill -u "$USER" -f 'inotifywait.*stimuli' 2>/dev/null || true
+pkill -u "$USER" -f "inotifywait -m -r .* $BASE/events" 2>/dev/null || true
 sleep 0.5
 
 if ss -ltn 2>/dev/null | grep -q ':1420 '; then
