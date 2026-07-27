@@ -22,6 +22,8 @@ import {
   fetchChannels,
   fetchChannelMessages,
   postChannelMessage,
+  fetchFullAgents,
+  setChannelAgent,
   createRemoteAttachWebSocket,
   createChannelWebSocket,
   type Connection,
@@ -198,6 +200,23 @@ async function handleRpcFrame(ws: WebSocket, frame: { id: string; op?: string; p
           localScope(String(params.team || "local")),
         );
         result = { sent: true };
+        break;
+      }
+      case "agents.list": {
+        // Portal agent tabs. Ship only what the strip needs — never the
+        // system prompt or other config over the pipe.
+        const team = String(params.team || "local");
+        const agents = await fetchFullAgents(team, localScope(team));
+        result = agents.map((a) => ({ id: a.id, name: a.name, backend: a.backend, model: a.model }));
+        break;
+      }
+      case "channel.set_agent": {
+        await setChannelAgent(
+          String(params.channel || ""),
+          String(params.agent_id || ""),
+          localScope(String(params.team || "local")),
+        );
+        result = { set: true };
         break;
       }
       case "stream.subscribe": {
