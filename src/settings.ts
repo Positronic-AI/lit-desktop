@@ -9,9 +9,9 @@ import {
   fetchDefaultPrompt,
   getConnections, saveConnection, removeConnection,
   getActiveConnection, setActiveConnectionId,
-  startDeviceAuth, pollDeviceToken, signedInUser,
+  startDeviceAuth, pollDeviceToken, signedInUser, activeScope,
   type Credential, type Vendor, type CredMode, type FullAgent,
-  type BackendModel, type Connection,
+  type BackendModel, type Connection, type Scope,
 } from "./api";
 import { setRemoteAccess } from "./remote-access";
 
@@ -654,13 +654,17 @@ function openCreateWizard(): void {
 // panel's inline re-auth card can run the exact same flow in the chat area.
 // `onCancel` lets non-settings hosts recover their own UI (default: re-render
 // the settings setup screen, the original in-settings behavior).
-export async function runOAuth(host: HTMLElement, c: Credential, done?: () => void, onCancel?: () => void): Promise<void> {
+export async function runOAuth(host: HTMLElement, c: Credential, done?: () => void, onCancel?: () => void, scope: Scope = activeScope()): Promise<void> {
+  // Scope determines WHICH SERVER gets authenticated. A chat tab standing on a
+  // remote connection must pass its own scope — defaulting to the app-active
+  // scope there signs in the wrong machine while the banner keeps telling the
+  // truth about the remote one.
   const backend = backendForVendorMode(c.vendor, c.mode);
   host.innerHTML = "";
   host.appendChild(el("div", "cred-detail-line muted", "Starting sign-in…"));
   let session;
   try {
-    session = await startOAuth(backend, c.id || undefined);
+    session = await startOAuth(backend, c.id || undefined, scope);
   } catch {
     host.innerHTML = "";
     host.appendChild(el("div", "settings-error", "Could not start sign-in."));
@@ -684,7 +688,7 @@ export async function runOAuth(host: HTMLElement, c: Credential, done?: () => vo
     host.appendChild(box);
     const poll = async () => {
       try {
-        const s = await oauthStatus(backend, session!.session_id);
+        const s = await oauthStatus(backend, session!.session_id, scope);
         if (s.status === "authenticated") { if (done) done(); return; }
         if (s.status === "failed" || s.status === "cancelled") {
           box.appendChild(el("div", "settings-error", "Sign-in failed."));
@@ -711,7 +715,7 @@ export async function runOAuth(host: HTMLElement, c: Credential, done?: () => vo
     submit.textContent = "Verifying…";
     submit.setAttribute("disabled", "true");
     try {
-      const r = await submitOAuthCode(backend, session!.session_id, codeInput.value.trim());
+      const r = await submitOAuthCode(backend, session!.session_id, codeInput.value.trim(), scope);
       if (r.status === "authenticated" || !r.error) { if (done) done(); else (onCancel || renderSetup)(); }
       else throw new Error(r.error || "failed");
     } catch {
@@ -722,7 +726,7 @@ export async function runOAuth(host: HTMLElement, c: Credential, done?: () => vo
     }
   });
   const cancel = el("button", "settings-mini-btn ghost", "Cancel");
-  cancel.addEventListener("click", () => { cancelOAuth(backend, session!.session_id); (onCancel || renderSetup)(); });
+  cancel.addEventListener("click", () => { cancelOAuth(backend, session!.session_id, scope); (onCancel || renderSetup)(); });
   box.append(submit, err, cancel);
   host.appendChild(box);
 }

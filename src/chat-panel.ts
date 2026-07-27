@@ -1966,6 +1966,7 @@ export class ChatPanel {
           }, 5000);
         },
         () => void this.checkAgentAuth(), // cancel → back to the collapsed card
+        this.scope, // authenticate THIS tab's server, not the app-active one
       );
       this.scrollToBottom();
     } catch {
