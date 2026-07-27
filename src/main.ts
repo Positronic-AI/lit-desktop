@@ -281,13 +281,23 @@ registerPanel("app", () => {
 
 /** Open (or focus) a team app in its own panel. */
 function openApp(app: AppWidget): void {
-  if (app.type !== "iframe" || !app.url) {
+  // Component apps load via the sidecar's app-host page — a full
+  // LitWidgetHost (files over the commander API, theme, watch) served from
+  // the backend's own origin, in the same iframe panel iframe apps use.
+  let url: string | null = null;
+  if (app.type === "iframe" && app.url) {
+    url = app.url;
+  } else if (app.type === "component" && app.name) {
+    const team = activeChat().scope.team;
+    url = `/mux/app-host/${encodeURIComponent(team)}/${encodeURIComponent(app.name)}?operating_team=${encodeURIComponent(team)}`;
+  }
+  if (!url) {
     activeChat().renderMessage({ role: "system", content: `"${app.title}" isn't a supported app type in the desktop yet.` });
     return;
   }
   const id = `app-${app.id}`;
   if (!wm.hasPanel(id)) {
-    wm.addPanel({ id, component: "app", title: app.title, params: { url: app.url } });
+    wm.addPanel({ id, component: "app", title: app.title, params: { url } });
   }
   wm.focusPanel(id);
 }

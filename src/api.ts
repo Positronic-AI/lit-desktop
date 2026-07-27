@@ -459,6 +459,7 @@ export async function fetchAgents(scope: Scope = activeScope()): Promise<Agent[]
 
 export interface AppWidget {
   id: string;
+  name: string;
   title: string;
   type: string; // "iframe" | "markdown" | "component"
   url?: string | null;
