@@ -29,6 +29,7 @@ import { registerPanel } from "./panel-host";
 import { mountGraphView } from "./graph-view";
 import { ChatPanel, escapeHtml } from "./chat-panel";
 import { syncRemoteAccessPipes } from "./remote-access";
+import "./store-panel";
 import "dockview-core/dist/styles/dockview.css";
 
 // --- Docking shell (Step 1: chat becomes a dockview panel) ---
@@ -1061,6 +1062,13 @@ function getCommands(): Command[] {
     },
   });
   cmds.push({ id: "manage-servers", label: "Manage Servers…", icon: "🌐", action: () => openSettings(() => loadInitialData()) });
+  cmds.push({
+    id: "open-store", label: "App Store", icon: "🛍️",
+    action: () => {
+      if (!wm.hasPanel("store")) wm.addPanel({ id: "store", component: "store", title: "App Store" });
+      wm.focusPanel("store");
+    },
+  });
   cmds.push({
     id: "reset-layout",
     label: "Reset Window Layout",
