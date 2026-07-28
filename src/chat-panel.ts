@@ -2277,6 +2277,8 @@ export class ChatPanel {
           // Full content each frame (JSONL-sourced bridge + replay). Previously
           // ignored by the desktop, so those frames never rendered live.
           this.setStreamContent(data.content || "");
+        } else if (data.type === "action" && data.action) {
+          this.handleChatAction(data);
         } else if (data.type === "stream_end") {
           this.streamingChannels.delete(channelId);
           this.activeStreamId = null;
@@ -2303,6 +2305,78 @@ export class ChatPanel {
         this.wsReconnect(channelId);
       }
     };
+  }
+
+  // --- Agent-driven chat UI actions ---
+
+  // Orchestrations the channel agent may start via a chat `start_orchestration`
+  // action. Same allowlist as the webapp's heartbeat-widget — the actions
+  // endpoint is unauthenticated, so the frontend gates what actually runs.
+  private static readonly CHAT_STARTABLE_ORCHESTRATIONS = ["alms_guide_batch"];
+
+  // Agents drive UI via POST /channels/{id}/actions, relayed here over the
+  // channel WS. Mirrors the webapp handler: do the work, then ack with an
+  // `action_result` frame so the endpoint's 3s wait gets a real answer
+  // instead of a timeout. Before this handler the desktop dropped every chat
+  // action on the floor (2026-07-28 TCF batch QA).
+  private handleChatAction(data: any): void {
+    const ack = (payload: Record<string, unknown>) => {
+      if (this.channelWs?.readyState === WebSocket.OPEN && data.action_id) {
+        this.channelWs.send(JSON.stringify({
+          type: "action_result",
+          action_id: data.action_id,
+          action: data.action,
+          ...payload,
+        }));
+      }
+    };
+    if (data.action === "open_app" && data.app_id) {
+      // App panels belong to the shell (main.ts owns the app catalog and the
+      // dock) — hand off via a DOM event carrying the ack closure.
+      window.dispatchEvent(new CustomEvent("lit-open-app", {
+        detail: { appId: data.app_id, layout: data.layout, ack },
+      }));
+    } else if (data.action === "start_orchestration" && data.slug) {
+      void this.startOrchestrationFromAction(data, ack);
+    } else {
+      ack({ success: false, message: `Unsupported action: ${data.action}` });
+    }
+  }
+
+  // The agent emits the action through the unauthenticated actions endpoint;
+  // the real start runs here under the connection's auth, gated by the
+  // allowlist — and with params nested the way the start endpoint expects
+  // ({team, params}), which the agent's own fallback curl got wrong.
+  private async startOrchestrationFromAction(
+    data: any,
+    ack: (p: Record<string, unknown>) => void,
+  ): Promise<void> {
+    const slug: string = data.slug;
+    const channelId: string | undefined = data.channel_id || this.currentChannel?.id;
+    if (!ChatPanel.CHAT_STARTABLE_ORCHESTRATIONS.includes(slug)) {
+      ack({ success: false, message: `Orchestration '${slug}' is not allowed to start from chat` });
+      return;
+    }
+    if (!channelId) {
+      ack({ success: false, message: "No channel to start the orchestration in" });
+      return;
+    }
+    try {
+      const team = data.team || this.scope.team;
+      const res = await hostFetch(
+        `${this.scope.connection.url}/mux/channels/${channelId}/orchestrations/${encodeURIComponent(slug)}/start`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders(this.scope.connection) },
+          body: JSON.stringify({ team, params: data.params || {} }),
+        },
+      );
+      const body = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(body?.detail || `HTTP ${res.status}`);
+      ack({ success: true, name: body?.name, state: body?.state });
+    } catch (e: any) {
+      ack({ success: false, message: e?.message || "Failed to start orchestration" });
+    }
   }
 
   private wsReconnect(channelId: string): void {

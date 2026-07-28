@@ -66,6 +66,11 @@ _RUNTIME_DEPS = [
     'cryptography', 'dotenv', 'requests', 'psutil', 'typing_extensions', 'pytz',
     'dateutil', 'tqdm', 'filelock', 'urllib3', 'watchfiles', 'websocket',
     'socketio',
+    # Not imported by lit itself: team-app helper scripts (alms-guide's
+    # generate_batch_excel.py et al) run in-process in the frozen sidecar and
+    # import openpyxl — it must ride the bundle or those scripts die on the
+    # desktop with ModuleNotFoundError.
+    'openpyxl',
 ]
 hiddenimports += _RUNTIME_DEPS
 # Packages with lazily-imported submodules / bundled data need a full collect so

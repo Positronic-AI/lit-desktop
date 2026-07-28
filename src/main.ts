@@ -302,6 +302,28 @@ function openApp(app: AppWidget): void {
   wm.focusPanel(id);
 }
 
+// Agent-driven app opens: a chat `open_app` action lands in chat-panel's WS,
+// which hands off here (the shell owns the app catalog + dock). Matching by
+// id OR name because agents send the app.yaml name (e.g. "alms-guide"), with
+// one catalog refresh if it's not cached yet (fresh install, first action).
+window.addEventListener("lit-open-app", (e: Event) => {
+  const { appId, ack } = (e as CustomEvent).detail || {};
+  void (async () => {
+    const find = () => appsCache.find((a) => a.id === appId || a.name === appId);
+    let app = find();
+    if (!app) {
+      try { appsCache = await fetchApps(activeChat().scope); } catch { /* keep cache */ }
+      app = find();
+    }
+    if (!app) {
+      ack?.({ success: false, message: `Unknown app: ${appId}` });
+      return;
+    }
+    openApp(app);
+    ack?.({ success: true, message: `Opened ${app.title}` });
+  })();
+});
+
 // Channel text search — a dock panel with a debounced search box + results.
 // Backed by GET /channels/{id}/messages/search. Clicking a hit that's currently
 // loaded scrolls to it and flashes it; older hits still show their excerpt.
