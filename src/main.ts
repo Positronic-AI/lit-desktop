@@ -13,6 +13,7 @@ import {
   createTeam,
   getConnections,
   getActiveConnection,
+  ensureFreshToken,
   activeScope,
   type Scope,
   type TeamInfo,
@@ -242,6 +243,7 @@ registerPanel("viewer", () => ({
 registerPanel("app", () => {
   let onMessage: ((ev: MessageEvent) => void) | null = null;
   let themeObserver: MutationObserver | null = null;
+  let tokenTimer: ReturnType<typeof setInterval> | null = null;
   return {
     mount(host: HTMLElement, params: Record<string, any>) {
       const url = String(params.url || "");
@@ -261,7 +263,24 @@ registerPanel("app", () => {
         const theme = document.documentElement.getAttribute("data-theme") || "dark";
         iframe.contentWindow?.postMessage({ type: "lit-theme", theme }, "*");
       };
-      iframe.addEventListener("load", postTheme);
+      // Remote app-host pages authenticate their commander calls with our
+      // Bearer token, delivered by postMessage (an iframe navigation can't
+      // carry headers). Origin-pinned so a page that navigated away can never
+      // receive it; re-posted on an interval because access tokens are
+      // short-lived (~5 min). Local connections have no token — nothing sent.
+      const conn = getConnections().find((c) => c.id === params.connectionId);
+      const postToken = async () => {
+        if (!conn?.token) return;
+        try { await ensureFreshToken(conn); } catch { /* post the token we have */ }
+        try {
+          iframe.contentWindow?.postMessage(
+            { type: "lit-token", token: conn.token },
+            new URL(conn.url).origin,
+          );
+        } catch { /* iframe gone or URL unparsable — interval retries */ }
+      };
+      iframe.addEventListener("load", () => { postTheme(); void postToken(); });
+      if (conn?.token) tokenTimer = setInterval(() => void postToken(), 4 * 60 * 1000);
       themeObserver = new MutationObserver(postTheme);
       themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
       onMessage = (ev: MessageEvent) => {
@@ -276,29 +295,44 @@ registerPanel("app", () => {
     dispose() {
       if (onMessage) window.removeEventListener("message", onMessage);
       themeObserver?.disconnect();
+      if (tokenTimer) clearInterval(tokenTimer);
     },
   };
 });
 
-/** Open (or focus) a team app in its own panel. */
+/** Open (or focus) a team app in its own panel.
+ *
+ *  Scope-aware: the app opens against the host the launching tab stands on
+ *  (address model — an app is a viewer over that host's data). The URL is
+ *  made absolute HERE, at open time, so a layout restore can't re-resolve it
+ *  against whatever tab happens to be active later. Same app on two hosts =
+ *  two panels (host in the panel id). */
 function openApp(app: AppWidget): void {
-  // Component apps load via the sidecar's app-host page — a full
-  // LitWidgetHost (files over the commander API, theme, watch) served from
-  // the backend's own origin, in the same iframe panel iframe apps use.
+  const scope = activeChat().scope;
+  const conn = scope.connection;
   let url: string | null = null;
   if (app.type === "iframe" && app.url) {
     url = app.url;
   } else if (app.type === "component" && app.name) {
-    const team = activeChat().scope.team;
-    url = `/mux/app-host/${encodeURIComponent(team)}/${encodeURIComponent(app.name)}?operating_team=${encodeURIComponent(team)}`;
+    // Component apps load via the owning backend's app-host page — a full
+    // LitWidgetHost (files over the commander API, theme, watch) served from
+    // that backend's own origin, so the app's relative /mux calls self-align.
+    const team = scope.team;
+    url = `${conn.url}/mux/app-host/${encodeURIComponent(team)}/${encodeURIComponent(app.name)}?operating_team=${encodeURIComponent(team)}`;
   }
   if (!url) {
     activeChat().renderMessage({ role: "system", content: `"${app.title}" isn't a supported app type in the desktop yet.` });
     return;
   }
-  const id = `app-${app.id}`;
+  const remote = conn.id !== "local";
+  const id = remote ? `app-${conn.id}-${app.id}` : `app-${app.id}`;
   if (!wm.hasPanel(id)) {
-    wm.addPanel({ id, component: "app", title: app.title, params: { url } });
+    wm.addPanel({
+      id,
+      component: "app",
+      title: remote ? `${app.title} — ${conn.name}` : app.title,
+      params: { url, connectionId: conn.id },
+    });
   }
   wm.focusPanel(id);
 }
