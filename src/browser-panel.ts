@@ -62,7 +62,7 @@ class BrowserPanel {
   private initialUrl: string;
 
   private host: HTMLElement | null = null;
-  private viewportImg: HTMLImageElement | null = null;
+  private viewportCanvas: HTMLCanvasElement | null = null;
   private viewportContainer: HTMLDivElement | null = null;
   private urlInput: HTMLInputElement | null = null;
   private tabsEl: HTMLElement | null = null;
@@ -75,7 +75,8 @@ class BrowserPanel {
   private tabs: TabInfo[] = [];
 
   private abort: AbortController | null = null;
-  private frameUrl: string | null = null;
+  private frameSeq = 0;
+  private frameDrawn = 0;
   private destroyed = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private resizeObserver: ResizeObserver | null = null;
@@ -157,13 +158,13 @@ class BrowserPanel {
           <button class="bp-nav-btn" data-nav="newtab" title="New tab (Ctrl+T)">+</button>
         </div>
         <div class="bp-viewport-container" tabindex="0">
-          <img class="bp-viewport" alt="">
+          <canvas class="bp-viewport"></canvas>
           <div class="bp-status"><div class="bp-spinner"></div></div>
           <div class="bp-offline" style="display:none">reconnecting…</div>
         </div>
       </div>`;
 
-    this.viewportImg = host.querySelector(".bp-viewport");
+    this.viewportCanvas = host.querySelector(".bp-viewport");
     this.viewportContainer = host.querySelector(".bp-viewport-container");
     this.urlInput = host.querySelector(".bp-url");
     this.tabsEl = host.querySelector(".bp-tabs");
@@ -208,10 +209,6 @@ class BrowserPanel {
     }
     this.abort?.abort();
     this.abort = null;
-    if (this.frameUrl) {
-      URL.revokeObjectURL(this.frameUrl);
-      this.frameUrl = null;
-    }
   }
 
   // ---- Session + stream ----
@@ -285,12 +282,32 @@ class BrowserPanel {
   }
 
   private onFrame(payload: FramePayload): void {
-    if (this.frameUrl) URL.revokeObjectURL(this.frameUrl);
     const binary = atob(payload.data);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    this.frameUrl = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
-    if (this.viewportImg) this.viewportImg.src = this.frameUrl;
+    // Decode off the main thread and paint onto the canvas. Deliberately NOT
+    // the webapp's blob-URL-per-frame approach: minting + revoking an object
+    // URL 10×/s churns WebKit's allocator hard, and WebKitGTK's DMA-BUF path
+    // has a known heap-corruption crash family under exactly that load
+    // (malloc_consolidate aborts, 2×2026-07-30). Seq guard drops frames that
+    // finish decoding out of order.
+    const seq = ++this.frameSeq;
+    createImageBitmap(new Blob([bytes], { type: "image/jpeg" }))
+      .then((bmp) => {
+        const canvas = this.viewportCanvas;
+        if (!canvas || seq <= this.frameDrawn) {
+          bmp.close();
+          return;
+        }
+        this.frameDrawn = seq;
+        if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+          canvas.width = bmp.width;
+          canvas.height = bmp.height;
+        }
+        canvas.getContext("2d")?.drawImage(bmp, 0, 0);
+        bmp.close();
+      })
+      .catch(() => { /* torn JPEG frame — the next one repaints */ });
 
     const prevUrl = this.currentUrl;
     if (payload.url) this.currentUrl = payload.url;
@@ -458,10 +475,10 @@ class BrowserPanel {
   }
 
   private clientToViewport(clientX: number, clientY: number): { x: number; y: number } | null {
-    const img = this.viewportImg;
-    if (!img) return null;
+    const canvas = this.viewportCanvas;
+    if (!canvas) return null;
     // object-fit: contain — compute the letterboxed content box, not the element box.
-    const rect = img.getBoundingClientRect();
+    const rect = canvas.getBoundingClientRect();
     const scale = Math.min(rect.width / this.viewportWidth, rect.height / this.viewportHeight);
     const cw = this.viewportWidth * scale;
     const ch = this.viewportHeight * scale;

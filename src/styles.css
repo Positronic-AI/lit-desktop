@@ -2675,3 +2675,182 @@ kbd {
   display: flex; align-items: center; gap: 8px;
   font-size: 13px; color: var(--text-secondary); cursor: pointer;
 }
+
+/* Capability chips — skills/tools counts on the agent-info line (right-aligned) */
+.caps-chips {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.caps-chip {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color, #3a3f4b);
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.caps-chip:hover {
+  opacity: 1;
+  border-color: var(--accent, #7aa2f7);
+}
+.caps-menu {
+  max-height: 380px;
+  overflow-y: auto;
+  min-width: 240px;
+}
+.caps-menu .caps-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.caps-menu .caps-src {
+  opacity: 0.55;
+  font-size: 10px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  padding: 0 5px;
+}
+
+/* Reactions — pills under messages, hover-revealed add button, picker grid */
+.reactions-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.reaction-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color, #3a3f4b);
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+.reaction-pill.mine {
+  border-color: var(--accent, #7aa2f7);
+  background: color-mix(in srgb, var(--accent, #7aa2f7) 14%, transparent);
+}
+.reaction-pill:hover { border-color: var(--accent, #7aa2f7); }
+.reaction-count { font-size: 11px; opacity: 0.8; }
+.add-reaction-btn {
+  border: none;
+  background: none;
+  color: inherit;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 1px 4px;
+  transition: opacity 0.12s;
+}
+.message:hover .add-reaction-btn { opacity: 0.55; }
+.add-reaction-btn:hover { opacity: 1 !important; }
+.reaction-picker-menu {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 2px;
+  padding: 6px;
+}
+.reaction-picker-menu .picker-emoji {
+  border: none;
+  background: none;
+  font-size: 18px;
+  padding: 5px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.reaction-picker-menu .picker-emoji:hover { background: var(--bg-hover, rgba(255,255,255,0.08)); }
+.reaction-picker-menu .picker-emoji.selected { background: color-mix(in srgb, var(--accent, #7aa2f7) 20%, transparent); }
+
+/* Agent visibility (star-to-hide) menu */
+.agent-vis-menu { min-width: 220px; }
+.agent-vis-row { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.agent-vis-star { width: 18px; text-align: center; color: var(--accent, #7aa2f7); }
+.agent-vis-btn { opacity: 0.6; }
+.agent-vis-btn:hover { opacity: 1; }
+
+/* File attachments — composer button, pending chips, drop overlay */
+.attach-btn {
+  border: none;
+  background: none;
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+  font-size: 15px;
+  /* Same 38px box as .send-btn so both center against the one-row textarea
+     and stay bottom-anchored together when it grows. */
+  height: 38px;
+  width: 30px;
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.attach-btn:hover { opacity: 1; }
+.pending-files-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 16px 0;
+}
+.pending-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color, #3a3f4b);
+  font-size: 12px;
+  max-width: 260px;
+}
+.pending-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pending-file-size { opacity: 0.6; font-size: 11px; flex: none; }
+.pending-file-remove { border: none; background: none; color: inherit; cursor: pointer; opacity: 0.7; padding: 0; }
+.pending-file-remove:hover { opacity: 1; }
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--accent, #7aa2f7) 12%, rgba(0,0,0,0.55));
+  border: 2px dashed var(--accent, #7aa2f7);
+  border-radius: 8px;
+  pointer-events: none;
+}
+.drop-overlay-text { font-size: 16px; font-weight: 600; }
+
+/* Attachment chips in message bubbles — [name](url) markdown rendered as files */
+.attachment-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(0, 0, 0, 0.15);
+  color: inherit;
+  text-decoration: none;
+  font-size: 12px;
+  max-width: 280px;
+}
+.attachment-chip:hover { background: rgba(0, 0, 0, 0.28); }
+.attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

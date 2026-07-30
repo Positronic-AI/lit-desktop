@@ -7,11 +7,14 @@ import {
   fetchApps,
   type AppWidget,
   readServerFile,
+  hostFetch,
+  authHeaders,
   writeServerFile,
   searchChannelMessages,
   fetchTeams,
   createTeam,
   getConnections,
+  getActiveTeam,
   getActiveConnection,
   ensureFreshToken,
   activeScope,
@@ -65,6 +68,9 @@ document.addEventListener(
   (e) => {
     const a = (e.target as HTMLElement).closest?.("a[href]") as HTMLAnchorElement | null;
     if (!a) return;
+    // Anchors marked in-app (attachment chips for types our viewers render)
+    // are handled by their own bubbling handler — don't intercept.
+    if (a.dataset.inApp) return;
     const href = a.getAttribute("href") || "";
     if (!/^https?:\/\//i.test(href)) return;
     e.preventDefault();
@@ -85,6 +91,7 @@ function wireChatHooks(p: ChatPanel): void {
   // A path clicked in a message opens on the machine that message lives on —
   // the panel's own scope, not whichever place happens to be focused.
   p.onOpenFile = (path) => openViewer(path, p.scope);
+  p.onOpenAttachment = (url, name) => openViewerUrl(url, name, p.scope);
 }
 
 // A chat tab: its own ChatPanel standing in (connectionId, team) — possibly a
@@ -166,7 +173,10 @@ function openChatTab(connectionId: string, team: string): void {
 // editor/diff comes later.
 registerPanel("viewer", () => ({
   mount(host: HTMLElement, params: Record<string, any>) {
-    const path = String(params.path || "");
+    // Two modes: a server file PATH (editable, read via commander), or a URL
+    // (read-only — channel-upload attachments opened from chat chips).
+    const url = String(params.url || "");
+    const path = url ? String(params.title || url.split("/").pop() || "") : String(params.path || "");
     // Resolve the scope the panel was opened with (survives layout restore via
     // params). A vanished connection falls back to the active scope.
     const conn = getConnections().find((c) => c.id === params.connectionId);
@@ -226,15 +236,32 @@ registerPanel("viewer", () => ({
     };
     editBtn.onclick = enterEdit;
 
-    readServerFile(path, scope)
-      .then((content) => {
-        raw = content;
-        renderView();
-      })
-      .catch((e) => {
-        body.classList.add("viewer-error");
-        body.textContent = `Couldn't open ${path}: ${e?.message || e}`;
-      });
+    if (url) {
+      editBtn.style.display = "none"; // URL mode is read-only
+      hostFetch(url, { headers: authHeaders(scope.connection) })
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.text();
+        })
+        .then((content) => {
+          raw = content;
+          renderView();
+        })
+        .catch((e) => {
+          body.classList.add("viewer-error");
+          body.textContent = `Couldn't open ${path}: ${e?.message || e}`;
+        });
+    } else {
+      readServerFile(path, scope)
+        .then((content) => {
+          raw = content;
+          renderView();
+        })
+        .catch((e) => {
+          body.classList.add("viewer-error");
+          body.textContent = `Couldn't open ${path}: ${e?.message || e}`;
+        });
+    }
   },
 }));
 
@@ -337,6 +364,25 @@ function openApp(app: AppWidget): void {
   }
   wm.focusPanel(id);
 }
+
+// OS file drag-drop, via Tauri's NATIVE drag events. HTML5 drag events never
+// fire for OS drags under Tauri's interception, and WebKitGTK doesn't deliver
+// them reliably even with interception disabled (both learned 2026-07-30) —
+// the native events are the one path that works on all three platforms. They
+// deliver PATHS; the local backend ingests them (POST /api/upload-path).
+void (async () => {
+  try {
+    const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+    await getCurrentWebview().onDragDropEvent((event) => {
+      const t = event.payload.type;
+      if (t === "enter" || t === "over") activeChat().showDropOverlay(true);
+      else if (t === "leave") activeChat().showDropOverlay(false);
+      else if (t === "drop") activeChat().stageDroppedPaths((event.payload as { paths: string[] }).paths || []);
+    });
+  } catch {
+    // Not running under Tauri (plain-browser dev) — no native drags to hook.
+  }
+})();
 
 // Shared browser panel (docs/plans/desktop-shared-browser.md): one panel,
 // focus-or-open, session "default" — the same session the agent's playwright
@@ -804,6 +850,21 @@ function setupAppToolbar(): void {
 /** Open a file in a viewer panel beside the chat (focus it if already open).
  *  The scope pins which machine the path lives on; the same path on two
  *  servers is two distinct panels. */
+/** Open a channel-upload attachment (by URL) in the read-only viewer panel. */
+function openViewerUrl(url: string, name: string, scope: Scope = activeScope()): void {
+  const id = `viewer:url:${url.split("?")[0]}`;
+  if (wm.hasPanel(id)) {
+    wm.focusPanel(id);
+    return;
+  }
+  wm.addPanel({
+    id,
+    component: "viewer",
+    title: name,
+    params: { url, title: name, connectionId: scope.connection.id, team: scope.team },
+  });
+}
+
 function openViewer(path: string, scope: Scope = activeScope()): void {
   const id = `viewer:${scope.connection.id}:${path}`;
   if (wm.hasPanel(id)) {
@@ -843,7 +904,16 @@ async function backendLogPath(): Promise<string> {
 
 async function startBackend(): Promise<boolean> {
   backendStartError = null;
-  if (await checkConnection()) return true;
+  // Probe the LOCAL connection explicitly — this function manages the local
+  // sidecar. checkConnection()'s default is the app-ACTIVE scope, which can be
+  // a remote place; with a dead remote session the probe fails 90 times while
+  // the local backend is perfectly healthy, and the app blames the backend
+  // ("did not become reachable") — Lais's macOS incident, 2026-07-30.
+  const localScope = {
+    connection: getConnections().find((c) => c.id === "local")!,
+    team: getActiveTeam(),
+  };
+  if (await checkConnection(localScope)) return true;
 
   try {
     const cmd = ShellCommand.sidecar(`binaries/${brand.sidecarName}`);
@@ -867,7 +937,7 @@ async function startBackend(): Promise<boolean> {
   // Defender scans every file, which can exceed 30s on the very first launch.
   for (let i = 0; i < 90; i++) {
     await new Promise((r) => setTimeout(r, 1000));
-    if (await checkConnection()) {
+    if (await checkConnection(localScope)) {
       console.log("[backend] ready");
       return true;
     }

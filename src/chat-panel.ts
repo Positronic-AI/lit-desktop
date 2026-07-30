@@ -32,12 +32,19 @@ import {
   clearInterrupt,
   getInterrupt,
   fetchUsage,
+  fetchAgentCapabilities,
+  type AgentCapabilities,
+  toggleChannelReaction,
+  createTelemetryWebSocket,
+  type Reaction,
   fetchBackendStatus,
   getAgent,
   listCredentials,
   type Credential,
   cancelStream,
   uploadImage,
+  uploadFile,
+  uploadPath,
   authHeaders,
   type Scope,
   type Agent,
@@ -523,7 +530,39 @@ function renderContentParts(parent: HTMLElement, parts: ContentPart[], role: str
       const content = document.createElement("div");
       content.className = "message-content";
       if (role === "user" && !(part.content || "").includes("![")) {
-        content.innerHTML = `<p>${escapeHtml(part.content || "").replace(/\n/g, "<br>")}</p>`;
+        // Attachment links ([name](url) markdown from the attach/drop flow)
+        // render as file chips — raw markdown URLs read like debug output.
+        const raw = part.content || "";
+        const links: { name: string; url: string }[] = [];
+        const text = raw
+          .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, name, url) => {
+            links.push({ name, url });
+            return "";
+          })
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+        content.innerHTML = `<p>${escapeHtml(text).replace(/\n/g, "<br>")}</p>`;
+        if (links.length) {
+          const chipRow = document.createElement("div");
+          chipRow.className = "attachment-chips";
+          for (const l of links) {
+            const a = document.createElement("a");
+            a.className = "attachment-chip";
+            a.href = l.url;
+            a.target = "_blank";
+            a.rel = "noopener";
+            const bare = l.url.split("?")[0];
+            const isImg = INAPP_IMAGE_RE.test(bare);
+            // Types our own viewers handle bypass the app-level external-link
+            // interception (capture phase) via data-in-app; the rest (PDF,
+            // unknown binaries) keep the system-handler default.
+            if (isImg || INAPP_TEXT_RE.test(bare)) a.dataset.inApp = "1";
+            a.innerHTML = `<span class="attachment-icon">${isImg ? "🖼" : "📄"}</span><span class="attachment-name"></span>`;
+            (a.querySelector(".attachment-name") as HTMLElement).textContent = l.name;
+            chipRow.appendChild(a);
+          }
+          content.appendChild(chipRow);
+        }
       } else {
         content.innerHTML = renderMarkdown(part.content || "");
       }
@@ -665,7 +704,22 @@ interface RenderableMessage {
   timestamp?: string;
   file_path?: string;
   metadata?: Record<string, unknown>;
+  reactions?: Reaction[];
 }
+
+// Attachment types our own surfaces render: images → lightbox, text-family →
+// viewer panel. Everything else (PDF, unknown binaries) opens via the OS until
+// the PreviewWidget port lands. Tested against the URL with query stripped.
+const INAPP_IMAGE_RE = /\.(png|jpe?g|gif|webp|heic)$/i;
+const INAPP_TEXT_RE = /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|toml|xml|html|css|log|py|js|ts|sh|sql|ini|conf|rs|go|java|c|h|cpp)$/i;
+
+// Same set + meanings as the webapp's chat-screen REACTION_EMOJIS.
+const REACTION_EMOJIS = ["👍", "👎", "🎯", "🔥", "😕", "❤️", "🙏", "💯", "🤣", "🤔", "👀", "🚀"];
+const REACTION_TOOLTIPS: Record<string, string> = {
+  "👍": "agree", "👎": "disagree", "🎯": "exactly right", "🔥": "great work",
+  "😕": "confusing", "❤️": "love it", "🙏": "thank you", "💯": "fully agree",
+  "🤣": "funny", "🤔": "thinking", "👀": "looking at this", "🚀": "shipped",
+};
 
 const HEADER_ITEMS_DEFAULT_ORDER = ["timestamp", "duration", "copy", "path", "session", "delete"];
 const HEADER_ITEMS_DEFAULT_FAVS = ["timestamp"];
@@ -803,6 +857,7 @@ export class ChatPanel {
   /** An image inside a message was clicked (main.ts opens the lightbox). */
   onImageClick: ((src: string) => void) | null = null;
   onOpenFile: ((path: string) => void) | null = null;
+  onOpenAttachment: ((url: string, name: string) => void) | null = null;
 
   // --- Chat state (former main.ts module globals) ---
   currentChannel: Channel | null = null;
@@ -813,7 +868,15 @@ export class ChatPanel {
   private channelModelOverride: string | null = null;
   agents: Agent[] = [];
   private channelWs: WebSocket | null = null;
+  private telemetryWs: WebSocket | null = null;
   private knownMessageIds = new Set<string>();
+  private reactionsByMessage = new Map<string, Reaction[]>();
+  private hiddenAgents = new Set<string>();
+  // file: bytes from the picker/HTML5 drop; path: Tauri native drag-drop
+  // (local-mode ingest — the backend reads the path itself).
+  private pendingFiles: { file?: File; path?: string; name: string; size: number }[] = [];
+  private dropOverlay: HTMLElement | null = null;
+  private static readonly MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB, webapp parity
   private localChannels: Channel[] = [];
   private channelListCache: Channel[] = [];
   private userIsScrolledUp = false;
@@ -942,6 +1005,7 @@ export class ChatPanel {
   dispose(): void {
     this.disposed = true;
     if (this.channelWs) { this.channelWs.close(); this.channelWs = null; }
+    if (this.telemetryWs) { this.telemetryWs.close(); this.telemetryWs = null; }
     if (this.wsReconnectTimer) { clearTimeout(this.wsReconnectTimer); this.wsReconnectTimer = null; }
     if (this.sidebarRefreshInterval) { clearInterval(this.sidebarRefreshInterval); this.sidebarRefreshInterval = null; }
     if (this.agentsRefreshInterval) { clearInterval(this.agentsRefreshInterval); this.agentsRefreshInterval = null; }
@@ -1003,6 +1067,21 @@ export class ChatPanel {
         e.preventDefault();
         this.onOpenFile?.(pathBtn.dataset.path);
       }
+      // Attachment chips open INSIDE the app: images in the lightbox, text
+      // files in the viewer panel. PDFs and other binaries fall through to the
+      // anchor default (system handler) until the PreviewWidget port lands.
+      const chip = target.closest(".attachment-chip") as HTMLAnchorElement | null;
+      if (chip?.href) {
+        const name = chip.querySelector(".attachment-name")?.textContent || "file";
+        const bare = chip.href.split("?")[0];
+        if (INAPP_IMAGE_RE.test(bare)) {
+          e.preventDefault();
+          this.onImageClick?.(chip.href);
+        } else if (INAPP_TEXT_RE.test(bare)) {
+          e.preventDefault();
+          this.onOpenAttachment?.(chip.href, name);
+        }
+      }
       // Question-card answer: post the chosen label tagged dialog-answer; the
       // mux matches it against the pending question and answers the dialog.
       // Recording by question text keeps the selection through streaming
@@ -1047,6 +1126,21 @@ export class ChatPanel {
 
     // Image paste
     this.messageInput.addEventListener("paste", (e) => this.handlePaste(e));
+
+    // File attach: picker button + drag-drop anywhere on the panel.
+    const attachBtn = this.root?.querySelector(".attach-btn") as HTMLButtonElement | null;
+    if (attachBtn) {
+      const fileInput = document.createElement("input");
+      fileInput.type = "file";
+      fileInput.multiple = true;
+      fileInput.style.display = "none";
+      this.root?.appendChild(fileInput);
+      attachBtn.addEventListener("click", () => fileInput.click());
+      fileInput.addEventListener("change", () => {
+        if (fileInput.files) this.stageFiles(Array.from(fileInput.files));
+        fileInput.value = "";
+      });
+    }
 
     // Input area resize
     if (this.inputAreaHeight > 0) {
@@ -1197,6 +1291,7 @@ export class ChatPanel {
           if (hasNewer) this.renderHistoryBanner(this.currentChannel);
           for (const msg of messages) {
             this.knownMessageIds.add(msg.id);
+            if (msg.metadata?.source === "reaction") continue;
             this.renderMessage({
               role: msg.direction === "in" ? "user" : "assistant",
               content: msg.content,
@@ -1205,6 +1300,7 @@ export class ChatPanel {
               timestamp: msg.timestamp,
               file_path: msg.file_path,
               metadata: msg.metadata,
+              reactions: msg.reactions,
             });
           }
           el = this.messagesEl.querySelector(sel);
@@ -1413,7 +1509,10 @@ export class ChatPanel {
 
     const el = document.createElement("div");
     el.className = `message ${msg.role}`;
-    if (msg.id) el.dataset.messageId = msg.id;
+    if (msg.id) {
+      el.dataset.messageId = msg.id;
+      this.reactionsByMessage.set(msg.id, msg.reactions || []);
+    }
 
     // Header
     const header = document.createElement("div");
@@ -1454,6 +1553,8 @@ export class ChatPanel {
       el.appendChild(linksRow);
     }
 
+    if (msg.id) this.renderReactionsRow(el, msg.id);
+
     this.messagesEl.appendChild(el);
     // Keep the auth card pinned below the newest message (like streamingEl).
     if (this.authBannerEl) this.messagesEl.appendChild(this.authBannerEl);
@@ -1465,6 +1566,129 @@ export class ChatPanel {
     }
 
     return el;
+  }
+
+  // --- Reactions (webapp chat-screen parity; events over /ws/telemetry) ---
+
+  /** Build (or rebuild) a message's reaction pills + add button. */
+  private renderReactionsRow(messageEl: HTMLElement, messageId: string): void {
+    messageEl.querySelector(".reactions-row")?.remove();
+    const reactions = this.reactionsByMessage.get(messageId) || [];
+
+    const row = document.createElement("div");
+    row.className = "reactions-row";
+
+    const groups = new Map<string, { count: number; mine: boolean; reactors: string[] }>();
+    for (const r of reactions) {
+      const g = groups.get(r.emoji) || { count: 0, mine: false, reactors: [] };
+      g.count++;
+      g.reactors.push(r.reactor);
+      if (r.reactor === "user") g.mine = true;
+      groups.set(r.emoji, g);
+    }
+
+    for (const [emoji, g] of groups) {
+      const pill = document.createElement("button");
+      pill.className = "reaction-pill" + (g.mine ? " mine" : "");
+      pill.innerHTML = `<span>${emoji}</span>${g.count > 1 ? `<span class="reaction-count">${g.count}</span>` : ""}`;
+      const meaning = REACTION_TOOLTIPS[emoji] ? ` — ${REACTION_TOOLTIPS[emoji]}` : "";
+      pill.title = `${g.reactors.join(", ")}${meaning}`;
+      pill.addEventListener("click", () => void this.toggleReaction(messageId, emoji));
+      row.appendChild(pill);
+    }
+
+    const add = document.createElement("button");
+    add.className = "add-reaction-btn";
+    add.textContent = "☺+";
+    add.title = "Add reaction";
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.showReactionPicker(e, messageId);
+    });
+    row.appendChild(add);
+
+    // Empty rows stay in the DOM (hidden add button appears on message hover)
+    // so an incoming reaction has a row to land in without a re-render.
+    messageEl.appendChild(row);
+  }
+
+  private showReactionPicker(event: MouseEvent, messageId: string): void {
+    closeContextMenu();
+    const menu = document.createElement("div");
+    menu.className = "context-menu reaction-picker-menu";
+    const mine = new Set(
+      (this.reactionsByMessage.get(messageId) || [])
+        .filter((r) => r.reactor === "user")
+        .map((r) => r.emoji),
+    );
+    for (const emoji of REACTION_EMOJIS) {
+      const btn = document.createElement("button");
+      btn.className = "picker-emoji" + (mine.has(emoji) ? " selected" : "");
+      btn.textContent = emoji;
+      btn.title = REACTION_TOOLTIPS[emoji] || "";
+      btn.addEventListener("click", () => {
+        closeContextMenu();
+        void this.toggleReaction(messageId, emoji);
+      });
+      menu.appendChild(btn);
+    }
+    document.body.appendChild(menu);
+    positionMenuNear(menu, event);
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
+  }
+
+  private async toggleReaction(messageId: string, emoji: string): Promise<void> {
+    if (!this.currentChannel) return;
+    const previous = this.reactionsByMessage.get(messageId) || [];
+    // Optimistic toggle; server response reconciles, error rolls back.
+    const idx = previous.findIndex((r) => r.emoji === emoji && r.reactor === "user");
+    const optimistic = idx >= 0
+      ? previous.filter((_, i) => i !== idx)
+      : [...previous, { emoji, reactor: "user", timestamp: new Date().toISOString() }];
+    this.updateMessageReactions(messageId, optimistic);
+    try {
+      const updated = await toggleChannelReaction(this.currentChannel.id, messageId, emoji, this.scope);
+      this.updateMessageReactions(messageId, updated);
+    } catch {
+      this.updateMessageReactions(messageId, previous);
+    }
+  }
+
+  private updateMessageReactions(messageId: string, reactions: Reaction[]): void {
+    this.reactionsByMessage.set(messageId, reactions);
+    const el = this.messagesEl.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`) as HTMLElement | null;
+    if (el) this.renderReactionsRow(el, messageId);
+  }
+
+  /** Reaction events arrive on the telemetry socket, not the channel WS —
+   *  same split as the webapp. One socket per panel, lazy reconnect. */
+  private connectTelemetry(): void {
+    this.telemetryWs?.close();
+    try {
+      this.telemetryWs = createTelemetryWebSocket(this.scope);
+    } catch {
+      return;
+    }
+    this.telemetryWs.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data as string);
+        if (data.type !== "telemetry_batch" || !Array.isArray(data.events)) return;
+        for (const evt of data.events) {
+          if (evt.type === "reaction" && evt.channel_id === this.currentChannel?.id && evt.message_id) {
+            this.updateMessageReactions(evt.message_id, evt.reactions || []);
+          }
+        }
+      } catch { /* non-JSON frame */ }
+    };
+    this.telemetryWs.onclose = () => {
+      this.telemetryWs = null;
+      if (!this.disposed) {
+        setTimeout(() => {
+          if (!this.disposed && !this.telemetryWs) this.connectTelemetry();
+        }, 5000);
+      }
+    };
+    this.telemetryWs.onerror = () => {};
   }
 
   /** Mark the question card a persisted dialog answer belongs to: the nearest
@@ -1491,6 +1715,7 @@ export class ChatPanel {
     if (!this.root) return; // not mounted (never the case in practice)
     this.messagesEl.innerHTML = "";
     this.knownMessageIds.clear();
+    this.reactionsByMessage.clear();
     this.userIsScrolledUp = false;
     cardAnswers.clear();
     this.updateScrollButton();
@@ -1530,6 +1755,11 @@ export class ChatPanel {
     this.agentTabsEl.innerHTML = "";
 
     for (const agent of this.agents) {
+      // Star-to-hide (webapp parity): hidden agents get no tab in this place —
+      // the cure for "accidentally asked the abodoo agent a fitness question".
+      // The ACTIVE agent always shows (a channel bound to a hidden agent must
+      // never look unattended).
+      if (this.hiddenAgents.has(agent.id) && this.currentAgent?.id !== agent.id) continue;
       const tab = document.createElement("div");
       tab.className = "agent-tab";
       if (this.currentAgent?.id === agent.id) tab.classList.add("active");
@@ -1553,6 +1783,65 @@ export class ChatPanel {
     addBtn.title = "Add agent";
     addBtn.addEventListener("click", () => openSettings(() => this.onReload?.(), { tab: "agents", agentId: "new" }));
     this.agentTabsEl.appendChild(addBtn);
+
+    if (this.agents.length > 1) {
+      const visBtn = document.createElement("div");
+      visBtn.className = "agent-tab-add agent-vis-btn";
+      visBtn.textContent = "☆";
+      visBtn.title = "Choose which agents appear here";
+      visBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.showAgentVisibilityMenu(e);
+      });
+      this.agentTabsEl.appendChild(visBtn);
+    }
+  }
+
+  // --- Agent visibility (star-to-hide, per place — webapp parity) ---
+
+  private agentVisKey(): string {
+    return `lit-agent-vis-${this.scope.connection.id}-${this.scope.team}`;
+  }
+
+  private loadAgentVisibility(): void {
+    try {
+      const raw = localStorage.getItem(this.agentVisKey());
+      this.hiddenAgents = new Set(raw ? (JSON.parse(raw) as string[]) : []);
+    } catch {
+      this.hiddenAgents = new Set();
+    }
+  }
+
+  private showAgentVisibilityMenu(event: MouseEvent): void {
+    closeContextMenu();
+    const menu = document.createElement("div");
+    menu.className = "context-menu agent-vis-menu";
+    const head = document.createElement("div");
+    head.className = "context-menu-item info menu-section-label";
+    head.textContent = `Agents in ${this.scope.team} · ${this.scope.connection.name}`;
+    menu.appendChild(head);
+    for (const agent of this.agents) {
+      const row = document.createElement("div");
+      row.className = "context-menu-item agent-vis-row";
+      const star = document.createElement("span");
+      star.className = "agent-vis-star";
+      star.textContent = this.hiddenAgents.has(agent.id) ? "☆" : "★";
+      const name = document.createElement("span");
+      name.textContent = agent.name;
+      row.append(star, name);
+      row.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (this.hiddenAgents.has(agent.id)) this.hiddenAgents.delete(agent.id);
+        else this.hiddenAgents.add(agent.id);
+        localStorage.setItem(this.agentVisKey(), JSON.stringify([...this.hiddenAgents]));
+        star.textContent = this.hiddenAgents.has(agent.id) ? "☆" : "★";
+        this.renderAgentTabs();
+      });
+      menu.appendChild(row);
+    }
+    document.body.appendChild(menu);
+    positionMenuNear(menu, event);
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
   }
 
   private renderAgentInfo(): void {
@@ -1616,6 +1905,94 @@ export class ChatPanel {
         this.agentInfoEl.appendChild(barsDiv);
       }
     }
+
+    // Capability chips — what this agent can do right now (skills + MCP
+    // tools), resolved server-side the same way dispatch resolves it. Counts
+    // at a glance; click for the list. Right-aligned via CSS margin.
+    const chipsDiv = document.createElement("div");
+    chipsDiv.className = "caps-chips";
+    this.agentInfoEl.appendChild(chipsDiv);
+    void this.loadCapabilityChips(agent, chipsDiv);
+  }
+
+  private async loadCapabilityChips(agent: Agent, container: HTMLDivElement): Promise<void> {
+    let caps: AgentCapabilities;
+    try {
+      caps = await fetchAgentCapabilities(agent.id, this.currentChannel?.id, this.scope);
+    } catch {
+      return; // older server without the endpoint — chips simply don't appear
+    }
+    if (!container.isConnected) return; // row re-rendered while we fetched
+    container.innerHTML = "";
+    const mkChip = (label: string, section: "skills" | "tools"): void => {
+      const chip = document.createElement("button");
+      chip.className = "caps-chip";
+      chip.textContent = label;
+      chip.title = "What this agent can do in this channel";
+      chip.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.showCapabilitiesMenu(e, caps, section);
+      });
+      container.appendChild(chip);
+    };
+    mkChip(`✦ ${caps.skills.length} skill${caps.skills.length === 1 ? "" : "s"}`, "skills");
+    mkChip(`⚒ ${caps.mcp_servers.length} tool${caps.mcp_servers.length === 1 ? "" : "s"}`, "tools");
+  }
+
+  private showCapabilitiesMenu(event: MouseEvent, caps: AgentCapabilities, focus: "skills" | "tools"): void {
+    closeContextMenu();
+    const menu = document.createElement("div");
+    menu.className = "context-menu caps-menu";
+
+    const section = (label: string, rows: { title: string; hint?: string; badge?: string }[]) => {
+      const head = document.createElement("div");
+      head.className = "context-menu-item info menu-section-label";
+      head.textContent = label;
+      menu.appendChild(head);
+      if (rows.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "context-menu-item info";
+        empty.textContent = "none";
+        menu.appendChild(empty);
+      }
+      for (const r of rows) {
+        const row = document.createElement("div");
+        row.className = "context-menu-item info caps-row";
+        const name = document.createElement("span");
+        name.textContent = r.title;
+        row.appendChild(name);
+        if (r.badge) {
+          const badge = document.createElement("span");
+          badge.className = "caps-src";
+          badge.textContent = r.badge;
+          row.appendChild(badge);
+        }
+        if (r.hint) row.title = r.hint;
+        menu.appendChild(row);
+      }
+    };
+
+    const skillRows = caps.skills.map((s) => ({
+      title: s.name,
+      hint: s.description || undefined,
+      badge: s.source === "personal" ? "personal" : undefined,
+    }));
+    const toolRows = caps.mcp_servers.map((m) => ({
+      title: m.name,
+      badge: m.source !== "agent" ? m.source : undefined,
+    }));
+
+    if (focus === "skills") {
+      section("Skills", skillRows);
+      section("Tools (MCP)", toolRows);
+    } else {
+      section("Tools (MCP)", toolRows);
+      section("Skills", skillRows);
+    }
+
+    document.body.appendChild(menu);
+    positionMenuNear(menu, event);
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
   }
 
   private showThrottleMenu(event: MouseEvent, agent: Agent, current: ThrottleState): void {
@@ -1977,8 +2354,10 @@ export class ChatPanel {
 
   private async loadChannelAgent(channelId: string): Promise<void> {
     this.channelModelOverride = null;
+    let configRead = false;
     try {
       const config = await getChannelConfig(channelId, this.scope);
+      configRead = true;
       const agentId = config.agent_id as string | null;
       if (agentId) {
         const agent = this.agents.find((a) => a.id === agentId);
@@ -1992,20 +2371,23 @@ export class ChatPanel {
         }
       }
     } catch {
-      // Config might not exist yet
+      // Config read FAILED — we know nothing about this channel's binding.
     }
 
     if (this.agents.length > 0 && !this.currentAgent) {
       this.currentAgent = this.agents[0];
     }
     if (this.currentAgent) {
-      // The channel had no binding (or a binding to an agent that no longer
-      // exists) — persist the agent we're about to DISPLAY as selected, so the
-      // UI never shows a watcher that isn't really watching. Without this, a
-      // message sent here sits unread forever while the tabs look bound
-      // (bitten live on jovai #general, 2026-07-22: stale bind to a dead
-      // "new-agent" while the UI showed claude selected).
-      setChannelAgent(channelId, this.currentAgent.id, this.scope).catch(() => {});
+      // The channel genuinely has no binding (or binds a dead agent) — persist
+      // the agent we're about to DISPLAY as selected, so the UI never shows a
+      // watcher that isn't really watching (jovai #general, 2026-07-22).
+      // ONLY when the config was successfully read: stamping after a FAILED
+      // read clobbered real bindings with whatever agent the previous channel
+      // had selected — how Ben's fitness channel got bound to the abodoo agent
+      // twice on 2026-07-30. On a failed read, display without persisting.
+      if (configRead) {
+        setChannelAgent(channelId, this.currentAgent.id, this.scope).catch(() => {});
+      }
       await this.loadChannelModelOverride(channelId, this.currentAgent.id);
     }
     this.renderAgentTabs();
@@ -2176,6 +2558,9 @@ export class ChatPanel {
       } else {
         for (const msg of messages) {
           this.knownMessageIds.add(msg.id);
+          // Reaction notifications are agent-facing inbox items, not chat
+          // content — the webapp filters them too.
+          if (msg.metadata?.source === "reaction") continue;
           this.renderMessage({
             role: msg.direction === "in" ? "user" : "assistant",
             content: msg.content,
@@ -2184,6 +2569,7 @@ export class ChatPanel {
             timestamp: msg.timestamp,
             file_path: msg.file_path,
             metadata: msg.metadata,
+            reactions: msg.reactions,
           });
         }
       }
@@ -2203,6 +2589,7 @@ export class ChatPanel {
 
   private connectWebSocket(channelId: string): void {
     this.channelWs = createChannelWebSocket(channelId, this.scope);
+    if (!this.telemetryWs) this.connectTelemetry();
 
     this.channelWs.onopen = () => {
       this.wsReconnectAttempt = 0;
@@ -2226,6 +2613,7 @@ export class ChatPanel {
           for (const msg of data.messages) {
             if (this.knownMessageIds.has(msg.id)) continue;
             this.knownMessageIds.add(msg.id);
+            if (msg.metadata?.source === "reaction") continue;
             if (suppressAfterStream(msg.direction)) continue;
             added = true;
             this.renderMessage({
@@ -2236,6 +2624,7 @@ export class ChatPanel {
               timestamp: msg.timestamp,
               file_path: msg.file_path,
               metadata: msg.metadata,
+              reactions: msg.reactions,
             });
           }
           if (added && document.visibilityState === "visible") {
@@ -2244,7 +2633,7 @@ export class ChatPanel {
         } else if (data.id && data.content && data.direction) {
           if (!this.knownMessageIds.has(data.id)) {
             this.knownMessageIds.add(data.id);
-            if (!suppressAfterStream(data.direction)) {
+            if (data.metadata?.source !== "reaction" && !suppressAfterStream(data.direction)) {
               this.renderMessage({
                 role: data.direction === "in" ? "user" : "assistant",
                 content: data.content,
@@ -2253,6 +2642,7 @@ export class ChatPanel {
                 timestamp: data.timestamp,
                 file_path: data.file_path,
                 metadata: data.metadata,
+                reactions: data.reactions,
               });
               if (this.streamingEl && data.direction === "in") {
                 this.messagesEl.appendChild(this.streamingEl);
@@ -2524,6 +2914,99 @@ export class ChatPanel {
 
   private static readonly MAX_PENDING_IMAGES = 3;
 
+  // --- File attachments (webapp chat-input parity) ---
+
+  /** Route incoming files: images join the paste-preview flow (3 max), the
+   *  rest become attachment chips; oversized files are refused loudly. */
+  private stageFiles(files: File[]): void {
+    const refused: string[] = [];
+    for (const file of files) {
+      if (file.size > ChatPanel.MAX_FILE_SIZE) {
+        refused.push(`${file.name} (over 25MB)`);
+        continue;
+      }
+      if (file.type.startsWith("image/") && this.pendingImageFiles.length < ChatPanel.MAX_PENDING_IMAGES) {
+        this.pendingImageFiles.push(file);
+        const reader = new FileReader();
+        reader.onload = () => {
+          this.pendingImageDataUrls.push(reader.result as string);
+          this.renderPendingImages();
+        };
+        reader.readAsDataURL(file);
+      } else {
+        this.pendingFiles.push({ file, name: file.name, size: file.size });
+      }
+    }
+    this.renderPendingFiles();
+    if (refused.length) {
+      this.renderMessage({ role: "system", content: `Not attached:\n${refused.map((f) => `- ${f}`).join("\n")}` });
+    }
+  }
+
+  private renderPendingFiles(): void {
+    let row = this.root?.querySelector(".pending-files-row") as HTMLElement | null;
+    if (this.pendingFiles.length === 0) {
+      row?.remove();
+      return;
+    }
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "pending-files-row";
+      this.inputRow.parentElement!.insertBefore(row, this.inputRow);
+    }
+    row.innerHTML = "";
+    this.pendingFiles.forEach((pf, i) => {
+      const chip = document.createElement("div");
+      chip.className = "pending-file-chip";
+      const size = pf.size === 0 ? "" : pf.size < 1024 * 1024 ? `${Math.round(pf.size / 1024)} KB` : `${(pf.size / (1024 * 1024)).toFixed(1)} MB`;
+      chip.innerHTML = `<span class="pending-file-name"></span><span class="pending-file-size">${size}</span><button class="pending-file-remove" title="Remove">&times;</button>`;
+      (chip.querySelector(".pending-file-name") as HTMLElement).textContent = pf.name;
+      chip.querySelector("button")!.addEventListener("click", () => {
+        this.pendingFiles.splice(i, 1);
+        this.renderPendingFiles();
+      });
+      row!.appendChild(chip);
+    });
+  }
+
+  /** Show/hide the "Drop files to attach" overlay. Driven by Tauri's native
+   *  drag events (main.ts) — OS drags never reach the DOM as HTML5 events
+   *  under Tauri's interception (and WebKitGTK doesn't deliver them reliably
+   *  even with interception off; learned 2026-07-30). */
+  showDropOverlay(show: boolean): void {
+    const root = this.root;
+    if (!root) return;
+    if (show && !this.dropOverlay) {
+      this.dropOverlay = document.createElement("div");
+      this.dropOverlay.className = "drop-overlay";
+      this.dropOverlay.innerHTML = `<div class="drop-overlay-text">Drop files to attach</div>`;
+      root.appendChild(this.dropOverlay);
+    } else if (!show && this.dropOverlay) {
+      this.dropOverlay.remove();
+      this.dropOverlay = null;
+    }
+  }
+
+  /** Native drag-drop delivers PATHS. Local scope: stage for backend-side
+   *  ingest. Remote scope: the remote backend can't read this disk — point at
+   *  the picker, which carries bytes. */
+  stageDroppedPaths(paths: string[]): void {
+    this.showDropOverlay(false);
+    if (!paths.length) return;
+    if (this.scope.connection.id !== "local") {
+      this.renderMessage({
+        role: "system",
+        content: "Drag-drop attaches local files to local places — for this remote place use the 📎 button instead.",
+      });
+      return;
+    }
+    for (const p of paths) {
+      const name = p.split(/[\\/]/).pop() || "file";
+      this.pendingFiles.push({ path: p, name, size: 0 });
+    }
+    this.renderPendingFiles();
+  }
+
   private renderPendingImages(): void {
     let row = this.root?.querySelector(".pending-images-row") as HTMLElement | null;
     if (this.pendingImageDataUrls.length === 0) {
@@ -2638,6 +3121,34 @@ export class ChatPanel {
       }
     }
 
+    // Upload non-image attachments → [name](url) markdown, webapp parity.
+    if (this.pendingFiles.length > 0 && this.currentChannel) {
+      const staged = [...this.pendingFiles];
+      this.pendingFiles = [];
+      this.renderPendingFiles();
+      const fileMarkdowns: string[] = [];
+      const failed: string[] = [];
+      for (const pf of staged) {
+        try {
+          const up = pf.file
+            ? await uploadFile(pf.file, this.currentChannel.id, this.scope)
+            : await uploadPath(pf.path!, this.currentChannel.id, this.scope);
+          fileMarkdowns.push(`[${up.name}](${up.url})`);
+        } catch (err: any) {
+          failed.push(err?.message ? `${pf.name} (${err.message})` : pf.name);
+        }
+      }
+      if (fileMarkdowns.length > 0) {
+        const filesBlock = fileMarkdowns.join("\n\n");
+        content = content
+          ? `${content}\n\n${filesBlock}`
+          : `${filesBlock}\n\nPlease review ${fileMarkdowns.length > 1 ? "these files" : "this file"}.`;
+      }
+      if (failed.length > 0) {
+        content = `${content ? content + "\n\n" : ""}> **Upload failed:**\n${failed.map((f) => `- ${f}`).join("\n")}`;
+      }
+    }
+
     this.renderMessage({ role: "user", content, timestamp: new Date().toISOString() });
     if (this.streamingEl) {
       this.messagesEl.appendChild(this.streamingEl);
@@ -2720,11 +3231,14 @@ export class ChatPanel {
       ]);
 
       this.agents = agentsData;
+      this.loadAgentVisibility();
       this.backendModels = modelsData;
 
       if (this.agents.length > 0) {
         const savedAgentId = localStorage.getItem("lit-desktop-agent");
-        this.currentAgent = (savedAgentId && this.agents.find(a => a.id === savedAgentId)) || this.agents[0];
+        this.currentAgent = (savedAgentId && this.agents.find(a => a.id === savedAgentId))
+          || this.agents.find((a) => !this.hiddenAgents.has(a.id))
+          || this.agents[0];
         // Load throttle state for all agents in parallel
         await Promise.all(this.agents.map((a) => this.loadAgentThrottle(a)));
         // Load usage for unique backends

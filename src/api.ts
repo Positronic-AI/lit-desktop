@@ -24,6 +24,12 @@ export interface Channel {
   };
 }
 
+export interface Reaction {
+  emoji: string;
+  reactor: string;
+  timestamp?: string;
+}
+
 export interface ChannelMessage {
   id: string;
   file: string;
@@ -35,6 +41,7 @@ export interface ChannelMessage {
   read: boolean;
   metadata?: Record<string, unknown>;
   file_path?: string;
+  reactions?: Reaction[];
 }
 
 export interface UsageQuota {
@@ -580,6 +587,32 @@ export async function fetchKnowledgeGraph(channelId: string, scope: Scope = acti
   return { nodes: data.nodes || [], edges: data.edges || [] };
 }
 
+export interface AgentCapabilities {
+  agent_id: string;
+  model?: string;
+  backend?: string;
+  skills: { name: string; description: string; source: string }[];
+  mcp_servers: { name: string; source: string }[];
+}
+
+/** Resolved skills + MCP servers the agent gets on its next dispatch in this
+ *  channel — computed server-side by the same path dispatch uses, so it
+ *  includes channel overrides and auto-injected servers (e.g. playwright
+ *  while the shared browser is active). */
+export async function fetchAgentCapabilities(
+  agentId: string,
+  channelId?: string,
+  scope: Scope = activeScope(),
+): Promise<AgentCapabilities> {
+  const params = new URLSearchParams({ team: scope.team });
+  if (channelId) params.set("channel_id", channelId);
+  return apiFetch<AgentCapabilities>(
+    `/agents/${encodeURIComponent(agentId)}/capabilities?${params.toString()}`,
+    undefined,
+    scope,
+  );
+}
+
 export async function postChannelMessage(
   channelId: string,
   content: string,
@@ -650,6 +683,60 @@ export async function setChannelModelOverride(channelId: string, agentId: string
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ agent_id: agentId, model, team: scope.team }),
   }, scope);
+}
+
+/** Toggle an emoji reaction (add if absent, remove if present) on a channel
+ *  message. Returns the message's full reaction list after the toggle. */
+export async function toggleChannelReaction(
+  channelId: string,
+  messageId: string,
+  emoji: string,
+  scope: Scope = activeScope(),
+): Promise<Reaction[]> {
+  const data = await apiFetch<{ reactions: Reaction[] }>(
+    `/channels/${channelId}/messages/${encodeURIComponent(messageId)}/reactions`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ emoji, reactor: "user", team: scope.team }),
+    },
+    scope,
+  );
+  return data.reactions || [];
+}
+
+/** Ingest a LOCAL file by path (Tauri native drag-drop delivers paths, not
+ *  bytes). Local-mode only — the backend shares our filesystem and reads it. */
+export async function uploadPath(
+  path: string,
+  channelId: string,
+  scope: Scope = activeScope(),
+): Promise<{ url: string; name: string }> {
+  const data = await apiFetch<{ url: string; original_name?: string; filename?: string }>(
+    "/api/upload-path",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, channel_id: channelId, team: scope.team }),
+    },
+    scope,
+  );
+  return { url: `${scope.connection.url}/mux${data.url}`, name: data.original_name || data.filename || path.split("/").pop() || "file" };
+}
+
+/** The telemetry WS — reaction events (and other activity) arrive here as
+ *  `telemetry_batch` frames, on a separate socket from the channel WS (same
+ *  split as the webapp). Same native-shim routing as the channel WS. */
+export function createTelemetryWebSocket(scope: Scope = activeScope()): WebSocket {
+  const conn = scope.connection;
+  const wsUrl = conn.url.replace(/^http/, "ws");
+  const params = new URLSearchParams();
+  if (conn.token) params.set("token", conn.token);
+  const full = `${wsUrl}/mux/ws/telemetry?${params.toString()}`;
+  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !full.startsWith("ws://127.0.0.1")) {
+    return new NativeWebSocketShim(full) as unknown as WebSocket;
+  }
+  return new WebSocket(full);
 }
 
 export interface ChannelSearchResult {
@@ -784,6 +871,26 @@ export async function uploadImage(file: File, channelId?: string, scope: Scope =
   if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
   const data = await res.json();
   return { url: `${base}/mux${data.url}`, filename: data.filename };
+}
+
+/** Upload an arbitrary attachment (CSV/PDF/log/…) to the channel's uploads
+ *  dir — same endpoint the webapp's composer attach uses. Returns the display
+ *  name and a resolvable URL for the [name](url) markdown reference. */
+export async function uploadFile(
+  file: File,
+  channelId: string,
+  scope: Scope = activeScope(),
+): Promise<{ url: string; name: string }> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const base = scope.connection.url;
+  const url = `${base}/mux/api/upload?channel_id=${encodeURIComponent(channelId)}&team=${encodeURIComponent(scope.team)}`;
+  const res = await hostFetch(url, { method: "POST", headers: authHeaders(scope.connection), body: formData });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.success === false) {
+    throw new Error(data.detail || `Upload failed: ${res.status}`);
+  }
+  return { url: `${base}/mux${data.url}`, name: data.original_name || data.filename || file.name };
 }
 
 // --- Credentials ---

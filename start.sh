@@ -17,6 +17,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# WebKitGTK's DMA-BUF renderer has a known heap-corruption crash family on
+# Linux (malloc_consolidate/fastbin aborts) — hit twice on 2026-07-30 once the
+# browser panel started decoding screencast frames at 10fps. Software rendering
+# path avoids it; Windows/macOS webviews are unaffected.
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+
 BASE="$HOME/.local/share/lit-desktop"
 LIT_BIN="/opt/lit-platform/lit-lib/.venv/bin/lit"
 BRIDGE_BIN="/opt/lit-platform/lit-bridge-rs/target/release/lit-bridge-rs"
