@@ -155,4 +155,14 @@ from lit.bin import main
 if __name__ == "__main__":
     if len(sys.argv) == 1:
         sys.argv += ["serve", "--api-only", "--host", "127.0.0.1", "--port", "5000"]
+    # serve.py defaults LIT_MUX_URL to "http://localhost:{port}/mux", but the
+    # shared browser's MCP rewrite turns that into the CDP-proxy WebSocket URL
+    # the agent's playwright dials — and on Windows "localhost" can resolve to
+    # IPv6 ::1 while this sidecar binds IPv4 127.0.0.1 only (same trap as the
+    # frontend's LOCAL_CONNECTION). Pin the literal address.
+    try:
+        _port = sys.argv[sys.argv.index("--port") + 1]
+    except (ValueError, IndexError):
+        _port = "5000"
+    os.environ.setdefault("LIT_MUX_URL", f"http://127.0.0.1:{_port}/mux")
     sys.exit(main())

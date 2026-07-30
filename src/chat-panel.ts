@@ -51,6 +51,7 @@ import { renderMarkdown } from "./markdown";
 import { openSettings, runOAuth } from "./settings";
 import { openTerminal, isTerminalOpen, fitToGrid } from "./terminal";
 import { brand } from "./brand";
+import { getWidgetContexts } from "./widget-context";
 
 // --- Shared helpers (module-level: no per-instance state) ---
 
@@ -2643,7 +2644,22 @@ export class ChatPanel {
     }
 
     try {
-      await postChannelMessage(this.currentChannel.id, content, this.scope);
+      // Client-built context envelope, same shape as the webapp's
+      // _buildChannelContextEnvelope: tells the agent what the user is
+      // currently looking at (open browser panel, etc.). Only added when a
+      // panel has registered context — plain messages stay plain. The local
+      // echo above renders the clean text; the renderer strips <context>
+      // blocks from history on reload, so the envelope is agent-facing only.
+      let outgoing = content;
+      const widgets = getWidgetContexts();
+      if (widgets.length > 0) {
+        const envelope = {
+          trigger: { type: "user_message", channel_id: this.currentChannel.id },
+          widgets,
+        };
+        outgoing = `<context>\n${JSON.stringify(envelope, null, 2)}\n</context>\n\n${content}`;
+      }
+      await postChannelMessage(this.currentChannel.id, outgoing, this.scope);
     } catch (err) {
       this.renderMessage({ role: "system", content: `Failed to send: ${err}` });
     }

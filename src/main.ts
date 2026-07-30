@@ -31,6 +31,7 @@ import { mountGraphView } from "./graph-view";
 import { ChatPanel, escapeHtml } from "./chat-panel";
 import { syncRemoteAccessPipes } from "./remote-access";
 import "./store-panel";
+import "./browser-panel";
 import "dockview-core/dist/styles/dockview.css";
 
 // --- Docking shell (Step 1: chat becomes a dockview panel) ---
@@ -337,6 +338,21 @@ function openApp(app: AppWidget): void {
   wm.focusPanel(id);
 }
 
+// Shared browser panel (docs/plans/desktop-shared-browser.md): one panel,
+// focus-or-open, session "default" — the same session the agent's playwright
+// MCP drives via the CDP proxy.
+function openBrowserPanel(initialUrl?: string): void {
+  if (!wm.hasPanel("browser")) {
+    wm.addPanel({
+      id: "browser",
+      component: "browser",
+      title: "Browser",
+      params: initialUrl ? { initialUrl } : {},
+    });
+  }
+  wm.focusPanel("browser");
+}
+
 // Agent-driven app opens: a chat `open_app` action lands in chat-panel's WS,
 // which hands off here (the shell owns the app catalog + dock). Matching by
 // id OR name because agents send the app.yaml name (e.g. "alms-guide"), with
@@ -344,6 +360,14 @@ function openApp(app: AppWidget): void {
 window.addEventListener("lit-open-app", (e: Event) => {
   const { appId, ack } = (e as CustomEvent).detail || {};
   void (async () => {
+    // "Browser" is a built-in, not a catalog app — same agent vocabulary as
+    // the webapp, where open_app("Browser") resolves through the widget
+    // registry to BrowserWidget.
+    if (typeof appId === "string" && appId.toLowerCase() === "browser") {
+      openBrowserPanel();
+      ack?.({ success: true, message: "Opened the shared browser" });
+      return;
+    }
     const find = () => appsCache.find((a) => a.id === appId || a.name === appId);
     let app = find();
     if (!app) {
@@ -1103,6 +1127,7 @@ function getCommands(): Command[] {
       wm.focusPanel("store");
     },
   });
+  cmds.push({ id: "open-browser", label: "Open Browser", icon: "🌐", action: () => openBrowserPanel() });
   cmds.push({
     id: "reset-layout",
     label: "Reset Window Layout",

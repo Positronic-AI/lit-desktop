@@ -71,6 +71,11 @@ _RUNTIME_DEPS = [
     # import openpyxl — it must ride the bundle or those scripts die on the
     # desktop with ModuleNotFoundError.
     'openpyxl',
+    # Shared browser (browser_service.py imports playwright.async_api under
+    # try/except, invisible to PyInstaller through the compiled wheel). The
+    # playwright package registers its own PyInstaller hooks, which bundle its
+    # node driver alongside.
+    'playwright.async_api',
 ]
 hiddenimports += _RUNTIME_DEPS
 # Packages with lazily-imported submodules / bundled data need a full collect so
@@ -122,7 +127,6 @@ ML_EXCLUDES = [
     'pandas',
     'h5py', 'ml_dtypes',
     'matplotlib',
-    'playwright',
 ]
 
 
