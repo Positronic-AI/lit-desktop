@@ -54,6 +54,7 @@ import {
   type ThrottleState,
 } from "./api";
 import { open } from "@tauri-apps/plugin-dialog";
+import { markBusy, clearBusy, watchOrchestration } from "./busy";
 import { renderMarkdown } from "./markdown";
 import { openSettings, runOAuth } from "./settings";
 import { openTerminal, isTerminalOpen, fitToGrid } from "./terminal";
@@ -185,7 +186,7 @@ function parseMessageContent(raw: string): ParsedContent {
   // Remove heartbeat artifacts and context envelopes
   let content = raw
     .replace(/<context>[\s\S]*?<\/context>\s*/g, "")
-    .replace(/SLEEP_MODE:.*$/gm, "")
+    .replace(/^SLEEP_MODE.*$/gm, "")
     .replace(/^REACT:.*$/gm, "")
     .replace(/^LINKS:.*$/gm, "")
     .trim();
@@ -1119,6 +1120,7 @@ export class ChatPanel {
         this.finalizeStream();
         if (this.currentChannel) {
           this.streamingChannels.delete(this.currentChannel.id);
+          clearBusy(`stream:${this.currentChannel.id}`);
           this.renderSidebarIndicators();
         }
       }
@@ -2532,6 +2534,10 @@ export class ChatPanel {
 
   async openChannel(channel: Channel): Promise<void> {
     this.currentChannel = channel;
+    // Batches can be started outside chat (the app's own UI, or a direct POST —
+    // how the TCF resumes were driven), so a chat-action hook alone would miss
+    // them. Checking on open costs one request and exits immediately if idle.
+    watchOrchestration(this.scope.connection, channel.id);
     this.channelTitle.textContent = channel.name;
     localStorage.setItem(this.scopedKey("lit-desktop-channel"), JSON.stringify({ id: channel.id, name: channel.name }));
     this.renderChannelHeader();
@@ -2658,6 +2664,7 @@ export class ChatPanel {
           if (!this.streamingEl) this.showTypingIndicator();
         } else if (data.type === "stream_start") {
           this.streamingChannels.add(channelId);
+          markBusy(`stream:${channelId}`, `${this.currentChannel?.name || channelId} — agent is replying`);
           this.activeStreamId = data.stream_id || null;
           this.renderSidebarIndicators();
           this.showTypingIndicator();
@@ -2672,6 +2679,7 @@ export class ChatPanel {
           this.handleChatAction(data);
         } else if (data.type === "stream_end") {
           this.streamingChannels.delete(channelId);
+          clearBusy(`stream:${channelId}`);
           this.activeStreamId = null;
           this.renderSidebarIndicators();
           // Prefer the authoritative content carried on stream_end (JSONL-sourced)
@@ -2764,6 +2772,9 @@ export class ChatPanel {
       );
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body?.detail || `HTTP ${res.status}`);
+      // Hold a busy marker for as long as it runs, so closing the window
+      // mid-batch asks first (a vetting batch is 20+ minutes of work).
+      watchOrchestration(this.scope.connection, channelId);
       ack({ success: true, name: body?.name, state: body?.state });
     } catch (e: any) {
       ack({ success: false, message: e?.message || "Failed to start orchestration" });
@@ -2858,6 +2869,16 @@ export class ChatPanel {
     if (this.streamingEl && this.streamingText) {
       // Re-render with full parsing (tool calls become collapsible sections)
       const parsed = parseMessageContent(this.streamingText);
+
+      // Pure-sleep turns (SLEEP_MODE / REACT markers only) parse to nothing and
+      // aren't persisted to disk — drop the empty bubble like the webapp does.
+      if (parsed.parts.length === 0) {
+        this.streamingEl.remove();
+        this.streamingEl = null;
+        this.streamingText = "";
+        this.removeTypingIndicator();
+        return;
+      }
       const contentParent = this.streamingEl;
 
       // Remove old content and header, rebuild

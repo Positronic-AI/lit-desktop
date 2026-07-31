@@ -21,8 +21,10 @@ import {
   type Scope,
   type TeamInfo,
 } from "./api";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, ask } from "@tauri-apps/plugin-dialog";
+import { busyLabels } from "./busy";
 import { homeDir, join } from "@tauri-apps/api/path";
+import { invoke } from "@tauri-apps/api/core";
 import { Command as ShellCommand, type Child } from "@tauri-apps/plugin-shell";
 import { renderMarkdown } from "./markdown";
 import { openSettings, registerSettingsOpener, mountSettingsPanel, disposeSettingsPanel } from "./settings";
@@ -924,6 +926,15 @@ async function startBackend(): Promise<boolean> {
     cmd.stdout.on("data", (line) => console.log(`[backend] ${line}`));
     cmd.stderr.on("data", (line) => console.warn(`[backend] ${line}`));
     backendProcess = await cmd.spawn();
+    // Hand ownership to the Rust side, which reaps the whole tree on app exit.
+    // Only a backend WE spawned is ever registered: attaching to one we didn't
+    // launch must not make us kill it (on a dev box that's the start.sh sidecar
+    // on :5000).
+    try {
+      await invoke("register_backend_pid", { pid: backendProcess.pid });
+    } catch (e) {
+      console.error("[backend] could not register pid for shutdown:", e);
+    }
     console.log("[backend] spawned, waiting for health check...");
   } catch (e) {
     // A spawn rejection (e.g. a shell-scope/capability denial) never writes to
@@ -1083,6 +1094,12 @@ function initTheme() {
 
 async function init() {
   document.title = brand.windowTitle;
+  // The NATIVE titlebar comes from tauri.conf.json's window title ("LIT") —
+  // release builds override it via the brand config overlay, but dev mode
+  // doesn't, so set it at runtime too (document.title doesn't propagate).
+  import("@tauri-apps/api/window")
+    .then((w) => w.getCurrentWindow().setTitle(brand.windowTitle))
+    .catch(() => {});
   initTheme();
   setStatus("connecting");
   setupDock();
@@ -1430,11 +1447,37 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-window.addEventListener("beforeunload", () => {
-  if (backendProcess) {
-    backendProcess.kill();
-    backendProcess = null;
-  }
-});
+// Backend shutdown lives in Rust now (src-tauri/src/lib.rs, RunEvent::ExitRequested).
+// The `beforeunload` handler that used to live here is deliberately gone: it did
+// not fire reliably on window close, and when it DID fire it made things worse —
+// killing the onefile bootloader first reparents the real server, bridge and
+// claude CLIs to init, where the Rust reaper's ppid walk can no longer find them.
+//
+// What DOES belong here is the confirmation, because the "is work in flight?"
+// state lives in the frontend. `onCloseRequested` is a Tauri event raised before
+// teardown begins — unlike `beforeunload`, preventDefault() on it is honoured.
+// `destroy()` then closes the window for real, and the runtime still emits
+// ExitRequested once the last window goes (tauri-runtime-wry lib.rs:4317-4323),
+// so the reaper runs either way.
+import("@tauri-apps/api/window")
+  .then(({ getCurrentWindow }) => {
+    const win = getCurrentWindow();
+    void win.onCloseRequested(async (event) => {
+      // Synchronous read by design — awaiting a backend call here would let a
+      // wedged or offline backend make the app impossible to close.
+      const busy = busyLabels();
+      if (busy.length === 0) return;
+      event.preventDefault();
+      const detail = busy.length === 1 ? busy[0] : busy.map((b) => `• ${b}`).join("\n");
+      const proceed = await ask(`${detail}\n\nClosing will stop it.`, {
+        title: "Work is still running",
+        kind: "warning",
+        okLabel: "Close anyway",
+        cancelLabel: "Keep working",
+      }).catch(() => true); // never trap the user in an unclosable window
+      if (proceed) await win.destroy();
+    });
+  })
+  .catch(() => {});
 
 init();
