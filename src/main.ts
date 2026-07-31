@@ -1456,13 +1456,24 @@ document.addEventListener("keydown", (e) => {
 // What DOES belong here is the confirmation, because the "is work in flight?"
 // state lives in the frontend. `onCloseRequested` is a Tauri event raised before
 // teardown begins — unlike `beforeunload`, preventDefault() on it is honoured.
-// `destroy()` then closes the window for real, and the runtime still emits
-// ExitRequested once the last window goes (tauri-runtime-wry lib.rs:4317-4323),
-// so the reaper runs either way.
+// The runtime still emits ExitRequested once the last window goes
+// (tauri-runtime-wry lib.rs:4317-4323), so the reaper runs either way.
+//
+// EVERY path below must end with a closable window. The first cut of this did
+// not: it called preventDefault() and then close/destroy, which `core:default`
+// does NOT grant (it covers 28 window commands, `allow-title` among them, but
+// neither `allow-close` nor `allow-destroy` — the same reason allow-set-title
+// is listed explicitly). The denial rejected, the prevent stood, and the app
+// could not be closed at all. Hence the capability grants AND the guard:
+// once the user has confirmed, `closeConfirmed` makes every later close request
+// pass straight through unprevented, so even if the programmatic close fails
+// the next click on the X closes the app.
+let closeConfirmed = false;
 import("@tauri-apps/api/window")
   .then(({ getCurrentWindow }) => {
     const win = getCurrentWindow();
     void win.onCloseRequested(async (event) => {
+      if (closeConfirmed) return;
       // Synchronous read by design — awaiting a backend call here would let a
       // wedged or offline backend make the app impossible to close.
       const busy = busyLabels();
@@ -1474,8 +1485,18 @@ import("@tauri-apps/api/window")
         kind: "warning",
         okLabel: "Close anyway",
         cancelLabel: "Keep working",
-      }).catch(() => true); // never trap the user in an unclosable window
-      if (proceed) await win.destroy();
+      }).catch(() => true); // a broken dialog must not trap the user either
+      if (!proceed) return;
+      closeConfirmed = true;
+      try {
+        await win.close();
+      } catch {
+        try {
+          await win.destroy();
+        } catch {
+          /* both denied: the guard above means the next click closes it */
+        }
+      }
     });
   })
   .catch(() => {});
