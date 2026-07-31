@@ -2676,6 +2676,16 @@ kbd {
   font-size: 13px; color: var(--text-secondary); cursor: pointer;
 }
 
+/* Active dockview tab drag: no text selection anywhere, and iframes must not
+   swallow the drag (they otherwise eat dragover and kill drops across them). */
+body.dv-tab-dragging,
+body.dv-tab-dragging * {
+  user-select: none !important;
+}
+body.dv-tab-dragging iframe {
+  pointer-events: none;
+}
+
 /* Capability chips — skills/tools counts on the agent-info line (right-aligned) */
 .caps-chips {
   margin-left: auto;

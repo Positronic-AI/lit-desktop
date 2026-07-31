@@ -60,6 +60,30 @@ export class WindowManager {
       this._debounce = setTimeout(() => this._persist(), 200);
     };
 
+    // While a tab/group drag is in flight, the browser happily extends a text
+    // selection through whatever panel content the pointer sweeps across —
+    // and iframes eat the drag events entirely. Flag the body for the drag's
+    // duration: CSS kills selection app-wide and lets drags cross iframes.
+    const onDragStart = (ev: DragEvent) => {
+      const t = ev.target as HTMLElement | null;
+      if (t?.closest?.(".dv-tab, .dv-tabs-and-actions-container")) {
+        document.body.classList.add("dv-tab-dragging");
+        window.getSelection()?.removeAllRanges();
+      }
+    };
+    const onDragEnd = () => document.body.classList.remove("dv-tab-dragging");
+    document.addEventListener("dragstart", onDragStart, true);
+    document.addEventListener("dragend", onDragEnd, true);
+    document.addEventListener("drop", onDragEnd, true);
+    this._disposables.push({
+      dispose: () => {
+        document.removeEventListener("dragstart", onDragStart, true);
+        document.removeEventListener("dragend", onDragEnd, true);
+        document.removeEventListener("drop", onDragEnd, true);
+        onDragEnd();
+      },
+    });
+
     this._disposables.push(
       this._api.onDidLayoutChange(persistSoon),
       this._api.onDidAddPanel(() => {

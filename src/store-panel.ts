@@ -133,7 +133,7 @@ registerPanel("store", () => {
           <div class="store-err"></div>
           <div class="store-list"></div>
           <div class="store-add">
-            <input class="store-add-repo" placeholder="github.com/owner/store-repo" spellcheck="false">
+            <input class="store-add-repo" placeholder="github.com/owner/store-repo or https://store URL" spellcheck="false">
             <input class="store-add-token" placeholder="token (private repos)" type="password" spellcheck="false">
             <button class="store-btn store-add-btn">Add store</button>
           </div>
