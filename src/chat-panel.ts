@@ -2523,7 +2523,10 @@ export class ChatPanel {
     this.channelActionsEl.querySelector(".kebab-btn")?.addEventListener("click", (e) => {
       showContextMenu(e as MouseEvent, [
         { label: "Copy path", action: () => {
-          if (this.currentChannel) navigator.clipboard.writeText(this.currentChannel.id).catch(() => {});
+          // Folder-backed channels have a real filesystem path; plain channels
+          // only have their id, which is the most useful thing we can offer.
+          const ch = this.currentChannel;
+          if (ch) navigator.clipboard.writeText(ch.folderPath || ch.id).catch(() => {});
         }},
         { label: "Archive channel", action: () => this.archiveCurrentChannel() },
       ]);

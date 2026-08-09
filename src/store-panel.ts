@@ -7,10 +7,10 @@
 import { registerPanel } from "./panel-host";
 import { hostFetch, authHeaders, activeScope, type Scope } from "./api";
 
-async function storeApi(path: string, body?: unknown): Promise<any> {
+async function storeApi(path: string, body?: unknown, method?: string): Promise<any> {
   const scope: Scope = activeScope();
   const res = await hostFetch(`${scope.connection.url}/mux/store/${path}`, {
-    method: body === undefined ? "GET" : "POST",
+    method: method ?? (body === undefined ? "GET" : "POST"),
     headers: { "Content-Type": "application/json", ...authHeaders(scope.connection) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
@@ -21,7 +21,10 @@ async function storeApi(path: string, body?: unknown): Promise<any> {
 
 const CSS = `
 .store-panel { padding: 12px; overflow-y: auto; height: 100%; font-size: 13px; }
-.store-repo { margin: 14px 0 6px; font-weight: 600; opacity: 0.75; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+.store-repo { margin: 14px 0 6px; font-weight: 600; opacity: 0.75; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; display: flex; align-items: center; gap: 8px; }
+.store-repo-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.store-remove { border: none; background: transparent; color: inherit; opacity: 0.45; cursor: pointer; font-size: 12px; padding: 2px 6px; border-radius: 4px; }
+.store-remove:hover { opacity: 1; background: rgba(128,128,128,0.15); }
 .store-row { display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 8px; border: 1px solid var(--border-color, #333); margin-bottom: 8px; }
 .store-info { flex: 1; min-width: 0; }
 .store-title { font-weight: 600; }
@@ -58,7 +61,25 @@ registerPanel("store", () => {
       for (const store of stores) {
         const head = document.createElement("div");
         head.className = "store-repo";
-        head.textContent = store.repo;
+        head.innerHTML = `<span class="store-repo-name"></span>`;
+        (head.querySelector(".store-repo-name") as HTMLElement).textContent = store.repo;
+        // Leaving a store must be a button, not a state.json hand-edit —
+        // Katie's stale GitHub subscription sat there as a red SSL error with
+        // no way out (2026-08-03). Installed packages are untouched by design.
+        const rm = document.createElement("button");
+        rm.className = "store-remove";
+        rm.title = "Remove this store";
+        rm.textContent = "✕";
+        rm.addEventListener("click", async () => {
+          if (!confirm(`Remove the store "${store.repo}"?\n\nInstalled apps stay installed — the app just stops checking this store for updates.`)) return;
+          try {
+            await storeApi("subscriptions", { repo: store.repo }, "DELETE");
+            await refresh();
+          } catch (e: any) {
+            err.textContent = e?.message || "Remove failed";
+          }
+        });
+        head.appendChild(rm);
         list.appendChild(head);
         if (store.error) {
           const e = document.createElement("div");

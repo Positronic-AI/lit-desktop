@@ -17,6 +17,8 @@ export interface Channel {
   id: string;
   name: string;
   unreadCount: number;
+  /** Absolute filesystem path for folder-backed channels. */
+  folderPath?: string;
   lastMessage?: {
     id: string;
     timestamp: string;
@@ -490,6 +492,7 @@ export async function fetchChannels(scope: Scope = activeScope()): Promise<Chann
     id: ch.id,
     name: ch.name,
     unreadCount: unreadMap.get(ch.id) || 0,
+    folderPath: ch.folder_path,
   }));
 }
 

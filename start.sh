@@ -81,6 +81,13 @@ fi
 echo "==> Starting backend from source ($LIT_BIN)…"
 mkdir -p "$BASE/data" "$BASE/config" "$BASE/events" "$BASE/run" "$BASE/logs"
 chmod 700 "$BASE/run"
+# Mobile pairing: persistent LAN token; sidecar binds the LAN so the phone
+# can reach it. The token gates every non-loopback request (LIT_LAN_TOKEN
+# middleware); the pairing QR lives in Settings → Mobile access.
+if [ ! -f "$BASE/config/lan-token" ]; then
+  head -c 24 /dev/urandom | base64 | tr -d '+/=' > "$BASE/config/lan-token"
+  chmod 600 "$BASE/config/lan-token"
+fi
 (
   export LIT_LOCAL_MODE=true
   export LIT_DATA_DIR="$BASE/data"
@@ -88,7 +95,8 @@ chmod 700 "$BASE/run"
   export LIT_EVENTS_PATH="$BASE/events"
   export XDG_RUNTIME_DIR="$BASE/run"
   export LIT_BRIDGE_RS_BIN="$BRIDGE_BIN"
-  exec "$LIT_BIN" serve --api-only --host 127.0.0.1 --port 5000
+  export LIT_LAN_TOKEN="$(cat "$BASE/config/lan-token")"
+  exec "$LIT_BIN" serve --api-only --host 0.0.0.0 --port 5000
 ) >> "$BASE/logs/backend.log" 2>&1 &
 BACKEND_PID=$!
 # Parity with the frozen sidecar: the backend dies when the launcher exits.

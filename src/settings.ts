@@ -173,10 +173,49 @@ function renderSetup(): void {
   serversRoot = el("div", "setup-section-body");
   serversSection.appendChild(serversRoot);
 
-  bodyEl.append(serversSection, connSection, agentSection);
+  const mobileSection = el("div", "setup-section");
+  const mobileTitle = el("h3", "setup-section-title", "Mobile access");
+  mobileSection.appendChild(mobileTitle);
+  const mobileRoot = el("div", "setup-section-body");
+  mobileSection.appendChild(mobileRoot);
+
+  bodyEl.append(serversSection, connSection, agentSection, mobileSection);
   renderConnections();
   renderAgents();
   renderServers();
+  renderMobilePairing(mobileRoot);
+}
+
+// ---- Mobile access (LAN pairing) ----
+// The sidecar mints the pairing payload; we just show it. Loopback-only on
+// the backend, so this card is the sole place the token becomes visible.
+async function renderMobilePairing(root: HTMLElement): Promise<void> {
+  root.innerHTML = "";
+  const base = "http://127.0.0.1:5000/mux";
+  try {
+    const res = await fetch(`${base}/pairing`);
+    if (!res.ok) throw new Error(String(res.status));
+    const info = (await res.json()) as { url: string; token: string };
+    root.appendChild(
+      el("p", "settings-intro",
+        "Scan from the LIT mobile app (phone on the same wifi) to see your channels there."),
+    );
+    const img = document.createElement("img");
+    img.src = `${base}/pairing/qr.svg`;
+    img.alt = "Mobile pairing QR";
+    img.style.cssText =
+      "width:240px;height:240px;background:#fff;padding:12px;border-radius:8px;display:block;margin:8px 0;";
+    root.appendChild(img);
+    const manual = el("p", "settings-intro",
+      `Manual entry — URL: ${info.url}  ·  Token: ${info.token}`);
+    manual.style.userSelect = "text";
+    root.appendChild(manual);
+  } catch {
+    root.appendChild(
+      el("p", "settings-intro",
+        "Pairing unavailable — backend not running with a LAN token (restart via start.sh, or this build predates mobile access)."),
+    );
+  }
 }
 
 // ---- Servers (connections to LIT hosts) ----
