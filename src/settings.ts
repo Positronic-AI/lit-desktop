@@ -174,7 +174,7 @@ function renderSetup(): void {
   serversSection.appendChild(serversRoot);
 
   const mobileSection = el("div", "setup-section");
-  const mobileTitle = el("h3", "setup-section-title", "Mobile access");
+  const mobileTitle = el("h3", "setup-section-title", "Mobile");
   mobileSection.appendChild(mobileTitle);
   const mobileRoot = el("div", "setup-section-body");
   mobileSection.appendChild(mobileRoot);
