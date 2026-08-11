@@ -12,7 +12,7 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { getServer } from "./api";
+import { getServer, ensureFreshToken, type Connection } from "./api";
 
 const BRIDGE_COLS = 200;
 const BRIDGE_ROWS = 50;
@@ -31,7 +31,7 @@ export function terminalChannel(): string | null {
   return currentChannelId;
 }
 
-export function openTerminal(container: HTMLElement, channelId: string): void {
+export function openTerminal(container: HTMLElement, channelId: string, conn?: Connection): void {
   closeTerminal();
   currentChannelId = channelId;
   hostEl = container;
@@ -48,10 +48,24 @@ export function openTerminal(container: HTMLElement, channelId: string): void {
   term.open(container);
   fitToGrid();
 
-  const base = getServer().url.replace(/^http/, "ws");
-  const url = `${base}/mux/ws/terminal-attach?channel_id=${encodeURIComponent(channelId)}`;
+  // The session lives on the TAB's server, not the app-active one — a remote
+  // tab attaching to the local backend finds nothing (and vice versa). Auth
+  // rides a query param because browser WebSockets can't set headers.
   term.write(`\x1b[90mAttaching to live session for #${channelId}…\x1b[0m\r\n`);
+  void (async () => {
+    let tokenQ = "";
+    if (conn) {
+      try { await ensureFreshToken(conn); } catch { /* stale token still tries */ }
+      if (conn.token) tokenQ = `&token=${encodeURIComponent(conn.token)}`;
+    }
+    if (currentChannelId !== channelId) return; // closed/re-opened mid-await
+    const base = (conn?.url ?? getServer().url).replace(/^http/, "ws");
+    const url = `${base}/mux/ws/terminal-attach?channel_id=${encodeURIComponent(channelId)}${tokenQ}`;
+    connectTerminal(url);
+  })();
+}
 
+function connectTerminal(url: string): void {
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
   ws.onmessage = (ev) => {
@@ -65,7 +79,7 @@ export function openTerminal(container: HTMLElement, channelId: string): void {
   ws.onerror = () => {
     term?.write(`\r\n\x1b[31m[terminal connection error]\x1b[0m\r\n`);
   };
-  term.onData((data) => {
+  term?.onData((data) => {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
   });
 }

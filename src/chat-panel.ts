@@ -965,6 +965,12 @@ export class ChatPanel {
     const openPref = localStorage.getItem(this.scopedKey("lit-sidebar-open"))
       ?? (this.scope.connection.id === "local" ? localStorage.getItem("lit-sidebar-open") : null);
     this.sidebarOpen = openPref !== "false";
+    // An auth card renders once at agent-select and would otherwise persist
+    // stale — if the credential is repaired elsewhere (webapp/mobile wizard)
+    // while the app sits open, re-verify whenever the user comes back to it.
+    window.addEventListener("focus", () => {
+      if (this.authBannerEl) void this.checkAgentAuth();
+    });
   }
 
   /** Per-place localStorage key — each (server, team) keeps its own channel
@@ -2547,7 +2553,7 @@ export class ChatPanel {
     // If the terminal is open, re-attach it to the newly-opened channel.
     if (isTerminalOpen()) {
       const host = document.getElementById("terminal-host");
-      if (host) { openTerminal(host, channel.id); setTimeout(fitToGrid, 60); }
+      if (host) { openTerminal(host, channel.id, this.scope.connection); setTimeout(fitToGrid, 60); }
     }
     this.clearMessages();
 
@@ -2869,6 +2875,11 @@ export class ChatPanel {
   }
 
   private finalizeStream(): void {
+    // A completed stream is living proof the login works — a "login expired"
+    // card rendered before a credential was repaired elsewhere (e.g. the
+    // mobile wizard) must not outlive the evidence. Re-check, don't just
+    // clear: the stream may also have surfaced a NEW auth failure.
+    if (this.authBannerEl) void this.checkAgentAuth();
     if (this.streamingEl && this.streamingText) {
       // Re-render with full parsing (tool calls become collapsible sections)
       const parsed = parseMessageContent(this.streamingText);

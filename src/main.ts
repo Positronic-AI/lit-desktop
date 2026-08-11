@@ -1062,7 +1062,7 @@ function setTerminalOpen(open: boolean) {
     if (dock) dock.style.display = "none";
     panel.style.display = "flex";
     cp.setTerminalButtonActive(true);
-    openTerminal(host, cp.currentChannel.id);
+    openTerminal(host, cp.currentChannel.id, cp.scope.connection);
     setTimeout(fitToGrid, 60);
   } else {
     panel.style.display = "none";
