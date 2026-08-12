@@ -30,6 +30,7 @@ import { renderMarkdown } from "./markdown";
 import { openSettings, registerSettingsOpener, mountSettingsPanel, disposeSettingsPanel } from "./settings";
 import { openTerminal, closeTerminal, isTerminalOpen, fitToGrid } from "./terminal";
 import { brand } from "./brand";
+import { openSupportLogDialog, supportLogAvailable } from "./support-log";
 import { WindowManager } from "./window-manager";
 import { registerPanel } from "./panel-host";
 import { mountGraphView } from "./graph-view";
@@ -1215,6 +1216,12 @@ function getCommands(): Command[] {
     },
   });
   cmds.push({ id: "open-browser", label: "Open Browser", icon: "🌐", action: () => openBrowserPanel() });
+  if (supportLogAvailable()) {
+    cmds.push({
+      id: "support-logs", label: "Send Logs to Support", icon: "🛟",
+      action: () => openSupportLogDialog(),
+    });
+  }
   cmds.push({
     id: "reset-layout",
     label: "Reset Window Layout",
