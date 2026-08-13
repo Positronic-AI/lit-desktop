@@ -53,6 +53,7 @@ import {
   type UsageReport,
   type ThrottleState,
 } from "./api";
+import { PoolGroup, buildModelPool, tupleLabel, findActiveEntry, backendsEquivalent, attachPoolMenuContent } from "./model-pool";
 import { open } from "@tauri-apps/plugin-dialog";
 import { markBusy, clearBusy, watchOrchestration } from "./busy";
 import { renderMarkdown } from "./markdown";
@@ -886,6 +887,7 @@ export class ChatPanel {
 
   // Agent control state
   private backendModels: Record<string, BackendModel[]> = {};
+  private poolGroups: PoolGroup[] = [];
   private agentThrottles: Record<string, ThrottleState> = {};
   private usageReports: Record<string, UsageReport> = {};
 
@@ -1886,7 +1888,7 @@ export class ChatPanel {
     const displayName = this.getModelDisplayName(effectiveModel);
     const effortHtml = agent.effort ? `<span class="effort-badge">${escapeHtml(agent.effort)}</span>` : "";
     modelBtn.innerHTML = `<span class="model-label">${escapeHtml(displayName)}</span>${effortHtml}<svg class="model-chevron" viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>`;
-    if (models.length > 1 || agent.backend === "claude-cli") {
+    if (models.length > 1 || this.poolGroups.length > 0 || agent.backend === "claude-cli") {
       modelBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.showModelMenu(e, agent, models, effectiveModel);
@@ -2032,8 +2034,31 @@ export class ChatPanel {
     const menu = document.createElement("div");
     menu.className = "context-menu model-menu";
 
-    // Model section
-    if (models.length > 1) {
+    // Model section — the POOL grammar (credentials unlock models): provider
+    // groups of "Model · credential" tuples, same as the webapp pickers. In a
+    // channel every provider is offered (override routes cross-provider);
+    // outside a channel only the agent's own provider (a default never crosses
+    // backends). Falls back to the bare own-backend list if the pool is empty.
+    const inChannel = !!this.currentChannel;
+    const knownBackends = new Set(Object.keys(this.backendModels));
+    const activeEntry = findActiveEntry(this.poolGroups, effectiveModel,
+      agent.backend, agent.credentials_id || null, knownBackends);
+    const visibleGroups = this.poolGroups
+      .map((g) => ({
+        provider: g.provider,
+        models: g.models.filter((m) => inChannel || backendsEquivalent(m.backend, agent.backend)),
+      }))
+      .filter((g) => g.models.length > 0);
+
+    if (visibleGroups.length > 0) {
+      attachPoolMenuContent(menu, visibleGroups, activeEntry?.key ?? null, (m) => {
+        closeContextMenu();
+        // Own backend keeps plain-model override semantics; cross-provider
+        // picks store the "backend:model" wire format.
+        const value = backendsEquivalent(m.backend, agent.backend) ? m.model : m.overrideValue;
+        this.changeModel(agent, value);
+      });
+    } else if (models.length > 1) {
       const label = document.createElement("div");
       label.className = "context-menu-item info menu-section-label";
       label.textContent = "Model";
@@ -2094,6 +2119,23 @@ export class ChatPanel {
   }
 
   private getModelDisplayName(model: string): string {
+    if (!model) return "?";
+    // Pool tuple first: the trigger reads "Model · credential" when the value
+    // matches a pool entry (checked against the current agent's credential).
+    const agent = this.currentAgent;
+    if (agent && this.poolGroups.length) {
+      const e = findActiveEntry(this.poolGroups, model, agent.backend,
+        agent.credentials_id || null, new Set(Object.keys(this.backendModels)));
+      if (e) return tupleLabel(e);
+    }
+    // "backend:model" override values — prefix only counts when it names a
+    // known backend (ollama model names contain colons: "qwen3.5:9b").
+    const idx = model.indexOf(":");
+    if (idx > 0 && this.backendModels[model.slice(0, idx)]) {
+      const rest = model.slice(idx + 1);
+      const found = (this.backendModels[model.slice(0, idx)] || []).find((m) => m.name === rest);
+      if (found) return found.display_name;
+    }
     for (const models of Object.values(this.backendModels)) {
       const found = models.find((m) => m.name === model);
       if (found) return found.display_name;
@@ -3268,6 +3310,9 @@ export class ChatPanel {
       this.agents = agentsData;
       this.loadAgentVisibility();
       this.backendModels = modelsData;
+      // Model pool (credentials unlock models) — non-blocking; the menu
+      // falls back to the own-backend list until it lands.
+      buildModelPool(this.scope).then((g) => { this.poolGroups = g; }).catch(() => {});
 
       if (this.agents.length > 0) {
         const savedAgentId = localStorage.getItem("lit-desktop-agent");

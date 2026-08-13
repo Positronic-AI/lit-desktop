@@ -5,15 +5,16 @@ import {
   listCredentials, createCredential, updateCredential, deleteCredential,
   setCredentialApiKey, fetchBackendStatus, backendForVendorMode,
   startOAuth, oauthStatus, submitOAuthCode, cancelOAuth,
-  fetchModelsWithConstraints, fetchFullAgents, getAgent, saveAgent, deleteAgent,
+  fetchFullAgents, getAgent, saveAgent, deleteAgent,
   fetchDefaultPrompt,
   getConnections, saveConnection, removeConnection,
   getActiveConnection, setActiveConnectionId,
   startDeviceAuth, pollDeviceToken, signedInUser, activeScope,
   type Credential, type Vendor, type CredMode, type FullAgent,
-  type BackendModel, type Connection, type Scope,
+  type Connection, type Scope,
 } from "./api";
 import { setRemoteAccess } from "./remote-access";
+import { PoolGroup, PoolEntry, buildModelPool, tupleLabel, attachPoolMenuContent } from "./model-pool";
 
 interface VendorMeta {
   id: Vendor;
@@ -113,10 +114,76 @@ export function openSettings(
 /** Panel mount — called by the dock when the Settings tab renders. */
 export function mountSettingsPanel(host: HTMLElement): void {
   const wrap = el("div", "settings-panel");
+  // Webapp-cue tab rail with REAL tab semantics (design session 2026-08-13):
+  // Setup keeps the causal chain intact on one page — connection → credential
+  // → models (derived) → agent — because splitting the chain across tabs
+  // would orphan each noun. Mobile is reference material: its own tab.
+  navEl = el("div", "settings-nav");
   bodyEl = el("div", "settings-body");
-  wrap.appendChild(bodyEl);
+  wrap.append(navEl, bodyEl);
   host.appendChild(wrap);
+  renderTabs();
+  renderActiveTab();
+}
+
+// The Setup chain's ROOT (design session 2026-08-13): connection → credential
+// → models → agents. Settings roots at ONE node at a time — independent of the
+// workspace's active connection, so you can configure any reachable node
+// without re-rooting your whole workspace. Default: Local (predictable).
+let setupConn: Connection | null = null;
+
+function setupScope(): Scope {
+  const conn = setupConn
+    ?? getConnections().find((c) => c.id === "local")
+    ?? getActiveConnection();
+  // Team is a content namespace (channels/apps); nothing on the Setup chain is
+  // team-scoped, so the pool/credential calls use the per-user root ("local").
+  return { connection: conn, team: "local" };
+}
+
+function setupConnSelectable(c: Connection): boolean {
+  return c.id === "local" || Boolean(c.auth === "keycloak" && c.refreshToken && signedInUser(c));
+}
+
+function selectSetupConn(c: Connection): void {
+  if ((setupConn?.id ?? "local") === c.id) return;
+  setupConn = c;
+  poolCache = [];
   renderSetup();
+}
+
+type SettingsTab = "setup" | "mobile";
+let activeTab: SettingsTab = "setup";
+
+function renderTabs(): void {
+  if (!navEl) return;
+  navEl.innerHTML = "";
+  const tabs: [SettingsTab, string][] = [["setup", "Setup"], ["mobile", "Mobile"]];
+  for (const [id, label] of tabs) {
+    const item = el("div", `settings-nav-item${id === activeTab ? " active" : ""}`, label);
+    item.addEventListener("click", () => {
+      if (activeTab === id) return;
+      activeTab = id;
+      renderTabs();
+      renderActiveTab();
+    });
+    navEl.appendChild(item);
+  }
+}
+
+function renderActiveTab(): void {
+  if (activeTab === "mobile") renderMobileTab();
+  else renderSetup();
+}
+
+function renderMobileTab(): void {
+  bodyEl.innerHTML = "";
+  const section = el("div", "setup-section");
+  section.appendChild(el("h3", "setup-section-title", "Mobile"));
+  const root = el("div", "setup-section-body");
+  section.appendChild(root);
+  bodyEl.appendChild(section);
+  renderMobilePairing(root);
 }
 
 /** Panel dispose — closing the tab commits the "done configuring" moment. */
@@ -127,8 +194,11 @@ export function disposeSettingsPanel(): void {
 }
 
 let bodyEl: HTMLElement;
+let navEl: HTMLElement | null = null;
 let connRoot: HTMLElement;   // content container for the Connections section
 let agentRoot: HTMLElement;  // content container for the Agents section
+let modelsRoot: HTMLElement | null = null;
+let modelsStatusEl: HTMLElement | null = null;
 // Section-header status chips (webapp Setup's checklist semantics: each
 // section says at a glance whether it's done or what's missing).
 let connStatusEl: HTMLElement;
@@ -139,6 +209,7 @@ let serversStatusEl: HTMLElement;
 // is never hidden behind a tab (mirrors the web app's Setup wizard, where users
 // kept missing that they still needed to create an agent).
 function renderSetup(): void {
+  if (activeTab !== "setup") { activeTab = "setup"; renderTabs(); }
   bodyEl.innerHTML = "";
   const connSection = el("div", "setup-section");
   const connTitle = el("h3", "setup-section-title", "Credentials");
@@ -173,17 +244,72 @@ function renderSetup(): void {
   serversRoot = el("div", "setup-section-body");
   serversSection.appendChild(serversRoot);
 
-  const mobileSection = el("div", "setup-section");
-  const mobileTitle = el("h3", "setup-section-title", "Mobile");
-  mobileSection.appendChild(mobileTitle);
-  const mobileRoot = el("div", "setup-section-body");
-  mobileSection.appendChild(mobileRoot);
+  // Models — the read-only derived noun: credentials unlock models.
+  // Collapsible, collapsed by default (webapp parity): the list is reference
+  // material, not a step — the count in the header tells the setup story.
+  const modelsSection = el("div", "setup-section");
+  const modelsTitle = el("h3", "setup-section-title collapsible collapsed", "Models");
+  modelsStatusEl = el("span", "section-status", "");
+  modelsTitle.appendChild(modelsStatusEl);
+  const chevron = el("span", "collapse-chevron", "▸");
+  modelsTitle.insertBefore(chevron, modelsTitle.firstChild);
+  modelsSection.appendChild(modelsTitle);
+  const modelsIntro = el("p", "settings-intro", "Unlocked by your credentials. Pick one for an agent below, or per channel from the channel's model selector.");
+  modelsSection.appendChild(modelsIntro);
+  modelsRoot = el("div", "setup-section-body");
+  modelsRoot.style.display = "none";
+  modelsIntro.style.display = "none";
+  modelsSection.appendChild(modelsRoot);
+  modelsTitle.addEventListener("click", () => {
+    const open = modelsRoot!.style.display !== "none";
+    modelsRoot!.style.display = open ? "none" : "";
+    modelsIntro.style.display = open ? "none" : "";
+    chevron.textContent = open ? "▸" : "▾";
+    modelsTitle.classList.toggle("collapsed", open);
+  });
 
-  bodyEl.append(serversSection, connSection, agentSection, mobileSection);
+  // The loud root label: which node the chain below configures.
+  const scopeConn = setupScope().connection;
+  const banner = el("div", `setup-scope-banner${scopeConn.id === "local" ? "" : " remote"}`);
+  banner.append(
+    el("span", "scope-banner-label", "Configuring "),
+    el("span", "scope-banner-name", scopeConn.name),
+    el("span", "scope-banner-note",
+      " — the credentials, models, and agents below live on this server. Select a connection above to configure a different one."),
+  );
+
+  bodyEl.append(serversSection, banner, connSection, modelsSection, agentSection);
   renderConnections();
+  renderModelsLens();
   renderAgents();
   renderServers();
-  renderMobilePairing(mobileRoot);
+}
+
+
+
+async function renderModelsLens(): Promise<void> {
+  if (!modelsRoot) return;
+  await refreshPool();
+  modelsRoot.innerHTML = "";
+  const count = poolCache.reduce((n, g) => n + g.models.length, 0);
+  if (modelsStatusEl) modelsStatusEl.textContent = count ? `${count} available` : "";
+  if (!count) {
+    modelsRoot.appendChild(el("p", "settings-intro muted", "No models yet — add a credential above."));
+    return;
+  }
+  for (const g of poolCache) {
+    const head = el("div", "pool-provider-label", g.provider);
+    modelsRoot.appendChild(head);
+    for (const m of g.models) {
+      const row = el("div", "pool-model-row");
+      const mode = m.credentialMode
+        ? ` (${m.credentialMode === "subscription" ? "subscription" : "per-token"})` : "";
+      const name = el("span", "pool-model-name", m.displayName);
+      const cred = el("span", "pool-cred", ` · ${m.credentialName || "local"}${mode}`);
+      row.append(name, cred);
+      modelsRoot.appendChild(row);
+    }
+  }
 }
 
 // ---- Mobile access (LAN pairing) ----
@@ -242,12 +368,20 @@ function renderServers(): void {
     // Same card grammar as credentials and agents: name + badges left,
     // status + actions right.
     const card = el("div", "cred-card");
+    const isSetupRoot = (setupConn?.id ?? "local") === c.id;
+    if (isSetupRoot) card.classList.add("setup-root");
+    if (setupConnSelectable(c)) {
+      card.classList.add("selectable");
+      card.title = isSetupRoot ? "" : `Configure ${c.name}'s credentials and agents`;
+      card.addEventListener("click", () => selectSetupConn(c));
+    }
     const head = el("div", "cred-head conn-head");
     const left = el("div", "cred-head-left");
     left.append(
       el("span", "cred-name", c.name),
       el("span", "cred-badge", c.url),
     );
+    if (isSetupRoot) left.appendChild(el("span", "cred-badge setup-root-chip", "Configuring"));
     if (c.auth === "keycloak") {
       const user = signedInUser(c);
       if (c.refreshToken && user) left.appendChild(el("span", "cred-badge mode-subscription", user));
@@ -255,14 +389,15 @@ function renderServers(): void {
     const right = el("div", "conn-head-right");
     if (c.auth === "keycloak" && !(c.refreshToken && signedInUser(c))) {
       const signIn = el("button", "settings-mini-btn", "Sign in") as HTMLButtonElement;
-      signIn.addEventListener("click", () => deviceSignIn(c, head, signIn));
+      signIn.addEventListener("click", (e) => { e.stopPropagation(); deviceSignIn(c, head, signIn); });
       right.appendChild(signIn);
     }
     if (c.id === active.id) {
       right.appendChild(el("span", "cred-status ok", "Connected"));
     } else {
       const use = el("button", "settings-mini-btn", "Connect") as HTMLButtonElement;
-      use.addEventListener("click", () => {
+      use.addEventListener("click", (e) => {
+        e.stopPropagation();
         const activate = () => {
           setActiveConnectionId(c.id);
           // Same precedent as team flips (and VS Code remotes): the whole
@@ -281,7 +416,8 @@ function renderServers(): void {
     }
     if (c.id !== "local") {
       const rm = el("button", "settings-mini-btn ghost", "Remove") as HTMLButtonElement;
-      rm.addEventListener("click", () => {
+      rm.addEventListener("click", (e) => {
+        e.stopPropagation();
         removeConnection(c.id);
         renderServers();
       });
@@ -411,7 +547,7 @@ async function renderConnections(): Promise<void> {
   root.appendChild(el("div", "settings-loading", "Loading…"));
   let creds: Credential[] = [];
   try {
-    creds = await listCredentials();
+    creds = await listCredentials("local", setupScope());
   } catch (e) {
     root.innerHTML = "";
     root.appendChild(el("div", "settings-error", "Failed to load credentials."));
@@ -486,7 +622,7 @@ async function renderCredDetail(detail: HTMLElement, c: Credential): Promise<voi
   const backend = backendForVendorMode(c.vendor, c.mode);
   let st;
   try {
-    st = await fetchBackendStatus(backend, c.id || undefined);
+    st = await fetchBackendStatus(backend, c.id || undefined, setupScope());
   } catch {
     st = null;
   }
@@ -522,7 +658,7 @@ async function renderCredDetail(detail: HTMLElement, c: Credential): Promise<voi
     renameBtn.addEventListener("click", async () => {
       renameBtn.textContent = "…";
       try {
-        await updateCredential(c.id!, { name: nameInput.value.trim() });
+        await updateCredential(c.id!, { name: nameInput.value.trim() }, "local", setupScope());
         c.name = nameInput.value.trim();
         renderConnections();
       } catch { renameBtn.textContent = "Failed"; }
@@ -559,7 +695,7 @@ async function renderCredDetail(detail: HTMLElement, c: Credential): Promise<voi
     // Re-auth (subscription)
     if (c.mode === "subscription") {
       const reauth = el("button", "settings-mini-btn", sm.cls === "ok" ? "Re-authenticate" : "Connect");
-      reauth.addEventListener("click", () => runOAuth(detail, c));
+      reauth.addEventListener("click", () => runOAuth(detail, c, undefined, undefined, setupScope()));
       detail.appendChild(reauth);
     }
 
@@ -567,7 +703,7 @@ async function renderCredDetail(detail: HTMLElement, c: Credential): Promise<voi
     const del = el("button", "settings-danger-link", "Delete credential");
     del.addEventListener("click", async () => {
       if (!confirm(`Delete credential "${c.name}"?`)) return;
-      try { await deleteCredential(c.id!); renderConnections(); } catch {}
+      try { await deleteCredential(c.id!, "local", setupScope()); renderConnections(); } catch {}
     });
     detail.appendChild(del);
   }
@@ -645,12 +781,12 @@ function openCreateWizard(): void {
       go.setAttribute("disabled", "true");
       err.style.display = "none";
       try {
-        const cred = await createCredential({ id: slug(name), name, vendor: state.vendor!, mode: state.mode! });
+        const cred = await createCredential({ id: slug(name), name, vendor: state.vendor!, mode: state.mode! }, "local", setupScope());
         // First-run funnel: with zero agents, the only sensible next step after
         // connecting is creating the agent — go straight to that form with the
         // fresh credential preselected instead of dropping back to Setup.
         const funnelToAgent = async () => {
-          const agents = await fetchFullAgents().catch(() => [] as FullAgent[]);
+          const agents = await fetchFullAgents("local", setupScope()).catch(() => [] as FullAgent[]);
           if (agents.length === 0) {
             pendingAgentId = "new";
             pendingCredentialId = cred.id ?? null;
@@ -665,7 +801,7 @@ function openCreateWizard(): void {
           const host = el("div");
           panel.innerHTML = "";
           panel.appendChild(host);
-          runOAuth(host, cred, () => void funnelToAgent());
+          runOAuth(host, cred, () => void funnelToAgent(), undefined, setupScope());
         }
       } catch (e) {
         go.textContent = isKey ? "Create & connect" : "Create & sign in";
@@ -772,25 +908,82 @@ export async function runOAuth(host: HTMLElement, c: Credential, done?: () => vo
 
 // --- Agents tab ------------------------------------------------------------
 
-let allModels: Record<string, BackendModel[]> = {};
-let modelConstraints: Record<string, string[]> = {};
 let credCache: Credential[] = [];
+let poolCache: PoolGroup[] = [];
+
+async function refreshPool(): Promise<void> {
+  try { poolCache = await buildModelPool(setupScope()); } catch { poolCache = []; }
+}
+
+/** ONE control for the (model, credential) tuple — LITERALLY the same
+ *  filtered picker as the channel model menu: a button showing the current
+ *  tuple, opening a popup with type-to-filter + provider groups. */
+function poolSelect(
+  current: { backend?: string; model?: string; credentials_id?: string | null },
+  onPick: (e: PoolEntry) => void,
+  wide = false,
+): HTMLElement {
+  const twin = (x: string) => x === "claude-cli" || x === "claude-interactive";
+  const findCurrent = (): PoolEntry | null => {
+    let fallback: PoolEntry | null = null;
+    for (const g of poolCache) {
+      for (const m of g.models) {
+        const backendMatch = m.backend === current.backend ||
+          (twin(m.backend) && twin(current.backend || ""));
+        if (backendMatch && m.model === current.model) {
+          if ((m.credentialId || "") === (current.credentials_id || "")) return m;
+          if (!fallback) fallback = m;
+        }
+      }
+    }
+    return fallback;
+  };
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = `settings-select pool-picker-btn${wide ? " wide" : ""}`;
+  const setLabel = () => {
+    const cur = findCurrent();
+    btn.textContent = cur ? tupleLabel(cur) : (current.model || "Pick a model…");
+  };
+  setLabel();
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    document.querySelectorAll(".pool-picker-menu").forEach((x) => x.remove());
+    const menu = document.createElement("div");
+    menu.className = "context-menu model-menu pool-picker-menu";
+    const close = () => menu.remove();
+    attachPoolMenuContent(menu, poolCache, findCurrent()?.key ?? null, (m) => {
+      close();
+      current.backend = m.backend;
+      current.model = m.model;
+      current.credentials_id = m.credentialId;
+      setLabel();
+      onPick(m);
+    });
+    document.body.appendChild(menu);
+    const rect = btn.getBoundingClientRect();
+    menu.style.position = "fixed";
+    menu.style.zIndex = "10000";
+    void menu.offsetHeight;
+    const mw = menu.getBoundingClientRect().width;
+    menu.style.left = Math.min(rect.left, window.innerWidth - mw - 8) + "px";
+    const spaceBelow = window.innerHeight - rect.bottom - 8;
+    const mh = Math.min(menu.getBoundingClientRect().height, spaceBelow >= 200 ? spaceBelow : window.innerHeight - 16);
+    menu.style.maxHeight = mh + "px";
+    menu.style.overflowY = "auto";
+    menu.style.top = (spaceBelow >= 200 ? rect.bottom + 4 : Math.max(8, rect.top - menu.getBoundingClientRect().height - 4)) + "px";
+    setTimeout(() => document.addEventListener("click", close, { once: true }), 0);
+  });
+  return btn;
+}
 
 function credFor(id?: string | null): Credential | undefined {
   if (!id) return undefined;
   return credCache.find((c) => c.id === id);
 }
 
-function modelsFor(agent: { backend: string; model?: string; credentials_id?: string | null }): BackendModel[] {
-  let list = (agent.backend && allModels[agent.backend]) || [];
-  const c = credFor(agent.credentials_id);
-  const allow = c ? modelConstraints[`${c.vendor}:${c.mode}`] : undefined;
-  if (allow) list = list.filter((m) => allow.includes(m.name));
-  if (agent.model && !list.some((m) => m.name === agent.model) && (!allow || allow.includes(agent.model))) {
-    return [{ name: agent.model, display_name: agent.model }, ...list];
-  }
-  return list;
-}
 
 async function renderAgents(): Promise<void> {
   const root = agentRoot;
@@ -798,11 +991,10 @@ async function renderAgents(): Promise<void> {
   root.appendChild(el("div", "settings-loading", "Loading…"));
   let agents: FullAgent[] = [];
   try {
-    const [a, m, creds] = await Promise.all([fetchFullAgents(), fetchModelsWithConstraints(), listCredentials()]);
+    const [a, creds] = await Promise.all([fetchFullAgents("local", setupScope()), listCredentials("local", setupScope())]);
     agents = a;
-    allModels = m.models;
-    modelConstraints = m.constraints;
     credCache = creds;
+    if (!poolCache.length) await refreshPool();
   } catch {
     root.innerHTML = "";
     root.appendChild(el("div", "settings-error", "Failed to load agents."));
@@ -852,43 +1044,12 @@ function agentRow(a: FullAgent): HTMLElement {
 
   const controls = el("div", "agent-row-controls");
 
-  // Credential select
-  const credSel = document.createElement("select");
-  credSel.className = "settings-select";
-  const none = document.createElement("option");
-  none.value = "";
-  none.textContent = "No credential (local models)";
-  credSel.appendChild(none);
-  for (const cr of credCache) {
-    if (!cr.id) continue;
-    const o = document.createElement("option");
-    o.value = cr.id;
-    o.textContent = `${cr.name} (${modeLabel(cr.vendor, cr.mode)})`;
-    if (cr.id === a.credentials_id) o.selected = true;
-    credSel.appendChild(o);
-  }
-
-  // Model select
-  const modelSel = document.createElement("select");
-  modelSel.className = "settings-select";
-  const fillModels = () => {
-    modelSel.innerHTML = "";
-    for (const m of modelsFor({ backend: a.backend, model: a.model, credentials_id: credSel.value || null })) {
-      const o = document.createElement("option");
-      o.value = m.name;
-      o.textContent = m.display_name || m.name;
-      if (m.name === a.model) o.selected = true;
-      modelSel.appendChild(o);
-    }
-  };
-  fillModels();
-
-  credSel.addEventListener("change", async () => {
-    await patchAgent(a.id, { credentials_id: credSel.value || null });
+  // ONE dropdown: the (model, credential) tuple — backend + credential derived.
+  const modelSel = poolSelect(a, async (e) => {
+    await patchAgent(a.id, {
+      backend: e.backend, model: e.model, credentials_id: e.credentialId,
+    });
     renderAgents();
-  });
-  modelSel.addEventListener("change", async () => {
-    await patchAgent(a.id, { model: modelSel.value });
   });
 
   const edit = el("button", "settings-mini-btn", "Edit");
@@ -896,19 +1057,19 @@ function agentRow(a: FullAgent): HTMLElement {
   const del = el("button", "settings-danger-link", "Delete");
   del.addEventListener("click", async () => {
     if (!confirm(`Delete agent "${a.name || a.id}"?`)) return;
-    try { await deleteAgent(a.id); renderAgents(); } catch {}
+    try { await deleteAgent(a.id, false, setupScope()); renderAgents(); } catch {}
   });
 
-  controls.append(credSel, modelSel, edit, del);
+  controls.append(modelSel, edit, del);
   row.appendChild(controls);
   return row;
 }
 
 // Full-config round-trip: never send partial updates.
 async function patchAgent(agentId: string, changes: Partial<FullAgent>): Promise<void> {
-  const full = await getAgent(agentId);
+  const full = await getAgent(agentId, setupScope());
   if (!full) return;
-  await saveAgent({ ...(full as any), ...changes, id: agentId, name: full.name });
+  await saveAgent({ ...(full as any), ...changes, id: agentId, name: full.name }, setupScope());
 }
 
 async function openAgentForm(agentId: string | null): Promise<void> {
@@ -922,7 +1083,7 @@ async function openAgentForm(agentId: string | null): Promise<void> {
 
   let existing: FullAgent | null = null;
   if (agentId) {
-    existing = await getAgent(agentId);
+    existing = await getAgent(agentId, setupScope());
   }
 
   const nameInput = document.createElement("input");
@@ -931,53 +1092,26 @@ async function openAgentForm(agentId: string | null): Promise<void> {
   nameInput.placeholder = "Agent name";
   nameInput.value = existing?.name || "";
 
-  const backends = Object.keys(allModels);
-  const backendSel = document.createElement("select");
-  backendSel.className = "settings-select wide";
-  for (const b of backends) {
-    const o = document.createElement("option");
-    o.value = b;
-    o.textContent = b;
-    if (b === (existing?.backend || "claude-cli")) o.selected = true;
-    backendSel.appendChild(o);
-  }
-
-  const credSel = document.createElement("select");
-  credSel.className = "settings-select wide";
-  const none = document.createElement("option");
-  none.value = ""; none.textContent = "No credential (local models)";
-  credSel.appendChild(none);
-  for (const cr of credCache) {
-    if (!cr.id) continue;
-    const o = document.createElement("option");
-    o.value = cr.id;
-    o.textContent = `${cr.name} (${modeLabel(cr.vendor, cr.mode)})`;
-    if (cr.id === (existing?.credentials_id ?? pendingCredentialId)) o.selected = true;
-    credSel.appendChild(o);
-  }
-  pendingCredentialId = null;
-
-  const modelSel = document.createElement("select");
-  modelSel.className = "settings-select wide";
-  const fillModels = () => {
-    modelSel.innerHTML = "";
-    for (const m of modelsFor({ backend: backendSel.value, model: existing?.model, credentials_id: credSel.value || null })) {
-      const o = document.createElement("option");
-      o.value = m.name; o.textContent = m.display_name || m.name;
-      if (m.name === existing?.model) o.selected = true;
-      modelSel.appendChild(o);
-    }
+  // ONE dropdown for (model, credential) — backend derived from the pick.
+  // A fresh-credential deep link preselects that credential's first tuple.
+  const picked = {
+    backend: existing?.backend || "claude-cli",
+    model: existing?.model || "",
+    credentials_id: existing?.credentials_id ?? pendingCredentialId ?? null,
   };
-  fillModels();
-  backendSel.addEventListener("change", fillModels);
-  credSel.addEventListener("change", fillModels);
+  pendingCredentialId = null;
+  const modelSel = poolSelect(picked, (e) => {
+    picked.backend = e.backend;
+    picked.model = e.model;
+    picked.credentials_id = e.credentialId;
+  }, true);
 
   // Role — system prompt (defaults to the backend's default for new agents).
   const promptInput = document.createElement("textarea");
   promptInput.className = "settings-input wide";
   promptInput.rows = 7;
   promptInput.value = existing?.system_prompt || "";
-  if (!existing) fetchDefaultPrompt("claude").then((p) => { if (!promptInput.value) promptInput.value = p; });
+  if (!existing) fetchDefaultPrompt("claude", setupScope()).then((p) => { if (!promptInput.value) promptInput.value = p; });
 
   // Advanced — temperature + reasoning effort.
   const tempInput = document.createElement("input");
@@ -1010,8 +1144,6 @@ async function openAgentForm(agentId: string | null): Promise<void> {
 
   form.append(
     field("Name", nameInput),
-    field("Credential", credSel),
-    field("Backend", backendSel),
     field("Model", modelSel),
     listenWrap,
     el("div", "form-section-label", "Role"),
@@ -1037,16 +1169,16 @@ async function openAgentForm(agentId: string | null): Promise<void> {
         ...base,
         id,
         name,
-        backend: backendSel.value,
-        model: modelSel.value,
-        credentials_id: credSel.value || null,
+        backend: picked.backend,
+        model: picked.model,
+        credentials_id: picked.credentials_id,
         system_prompt: promptInput.value,
         temperature: parseFloat(tempInput.value) || 0.7,
         effort: effortSel.value || null,
         // An agent that can't hear the channel is indistinguishable from a
         // broken install (Spuds, 2026-07-23). New agents listen by default.
         heartbeat_enabled: listenInput.checked,
-      });
+      }, setupScope());
       renderSetup();
     } catch {
       save.textContent = agentId ? "Save agent" : "Create agent";

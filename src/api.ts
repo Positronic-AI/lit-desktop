@@ -11,6 +11,8 @@ export interface Agent {
   status: string;
   heartbeat_enabled?: boolean;
   effort?: string | null;
+  /** Bound credential id — used to pick which pool tuple shows the checkmark. */
+  credentials_id?: string | null;
 }
 
 export interface Channel {

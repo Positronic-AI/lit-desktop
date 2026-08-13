@@ -2384,7 +2384,7 @@ kbd {
    measure (the modal's width constraint, kept without the modal). */
 .settings-panel {
   height: 100%;
-  overflow-y: auto;
+  overflow: hidden;
   display: flex;
   justify-content: center;
   background: var(--bg-primary);
@@ -2864,3 +2864,55 @@ body.dv-tab-dragging iframe {
 }
 .attachment-chip:hover { background: rgba(0, 0, 0, 0.28); }
 .attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Model pool menu (2026-08-13): tuple rows + type-to-filter, webapp parity */
+.model-menu { min-width: 300px; max-width: 400px; }
+.model-menu-list { max-height: 46vh; overflow-y: auto; }
+.model-menu .pool-cred { opacity: 0.55; font-size: 0.85em; }
+.model-menu-filter { padding: 6px 10px 4px; position: sticky; top: 0; }
+.model-menu-filter input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  outline: none;
+}
+.model-menu-filter input:focus { border-color: rgba(128, 128, 128, 0.7); }
+/* Tuple trigger labels are longer than bare model names */
+.agent-model-btn .model-label { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Setup Models lens */
+.pool-provider-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.5; margin: 10px 0 4px; }
+.pool-model-row { padding: 3px 0 3px 8px; font-size: 13px; }
+.pool-model-row .pool-model-name { font-weight: 500; }
+.pool-model-row .pool-cred { opacity: 0.55; font-size: 0.85em; }
+
+/* Collapsible Models section */
+.setup-section-title.collapsible { cursor: pointer; user-select: none; }
+.setup-section-title.collapsible:hover { opacity: 0.85; }
+.collapse-chevron { display: inline-block; width: 16px; opacity: 0.6; font-size: 11px; margin-right: 2px; }
+
+/* Settings pool picker: button face of the shared filtered menu */
+.pool-picker-btn { text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+.pool-picker-menu { position: fixed; }
+
+/* Settings outline rail (VS Code-style scroll-spy nav, not page tabs) */
+.settings-nav { flex: 0 0 160px; padding: 24px 8px 24px 16px; overflow-y: auto; border-right: 1px solid rgba(128, 128, 128, 0.15); }
+.settings-nav-item { padding: 6px 10px; font-size: 13px; opacity: 0.65; cursor: pointer; border-radius: 6px; border-left: 2px solid transparent; }
+.settings-nav-item:hover { opacity: 0.9; }
+.settings-nav-item.active { opacity: 1; border-left-color: currentColor; background: rgba(128, 128, 128, 0.08); font-weight: 500; }
+.settings-panel .settings-body { overflow-y: auto; min-width: 0; }
+
+/* Setup scope: connection rows select the chain's root */
+.cred-card.selectable { cursor: pointer; }
+.cred-card.selectable:hover { border-color: rgba(128, 128, 128, 0.45); }
+.cred-card.setup-root { border-color: var(--accent, #4a9eff); }
+.setup-root-chip { background: var(--accent, #4a9eff); color: #fff; opacity: 0.9; }
+.setup-scope-banner { margin: 4px 0 12px; padding: 8px 12px; border-radius: 8px; font-size: 12.5px; opacity: 0.75; border: 1px dashed rgba(128, 128, 128, 0.3); }
+.setup-scope-banner.remote { opacity: 1; border-style: solid; border-color: var(--accent, #4a9eff); }
+.setup-scope-banner .scope-banner-name { font-weight: 600; }
+.setup-scope-banner .scope-banner-note { opacity: 0.7; }
