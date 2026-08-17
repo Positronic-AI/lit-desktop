@@ -434,6 +434,18 @@ export async function checkConnection(scope: Scope = activeScope()): Promise<boo
   }
 }
 
+/** The backend's self-reported wheel version from /mux/health.
+ *  `null` = the backend answered but reports no version (pre-2.6.16 — stale by
+ *  definition). `undefined` = the probe itself failed, so don't judge. */
+export async function backendVersion(scope: Scope = activeScope()): Promise<string | null | undefined> {
+  try {
+    const h = await apiFetch<{ version?: string | null }>("/health", undefined, scope);
+    return h.version ?? null;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Read a file's text from the backend (the mux commander file API). */
 export async function readServerFile(path: string, scope: Scope = activeScope()): Promise<string> {
   const r = await apiFetch<{ success: boolean; data?: string; error?: string }>(

@@ -1,5 +1,6 @@
 import {
   checkConnection,
+  backendVersion,
   fetchCalendarDates,
   fetchCalendarDay,
   fetchMessageContent,
@@ -916,10 +917,51 @@ async function startBackend(): Promise<boolean> {
     connection: getConnections().find((c) => c.id === "local")!,
     team: getActiveTeam(),
   };
-  if (await checkConnection(localScope)) return true;
+  if (await checkConnection(localScope)) {
+    // Adopt-case handshake (Lais 2026-08-17): a healthy answer here can be a
+    // WEEKS-old sidecar from a previous install — reinstalling the app never
+    // fixed anything because we adopted the stale process. Compare the
+    // backend's wheel version against the one this build bundled; on mismatch,
+    // replace it — but only a process that is verifiably OUR sidecar binary.
+    // A start.sh dev backend (python) is never touched, and dev app builds
+    // (no VITE_LIB_VERSION baked in) never enforce.
+    const expected = ((import.meta as any).env?.VITE_LIB_VERSION as string | undefined) || null;
+    if (!expected) return true;
+    const got = await backendVersion(localScope); // undefined = probe failed: don't judge
+    if (got === undefined || got === expected) return true;
+    console.warn(`[backend] adopted backend is stale (version ${got ?? "unreported"}, bundled ${expected}) — replacing if ours`);
+    let reaped = false;
+    try {
+      const port = Number(new URL(localScope.connection.url).port || "5000");
+      reaped = await invoke<boolean>("reap_backend_on_port", { port, expectedPrefix: brand.sidecarName });
+    } catch (e) {
+      console.warn("[backend] stale-backend reap failed:", e);
+    }
+    // Not ours (or unkillable): a stale backend still beats no backend.
+    if (!reaped) return true;
+    // Wait for the port to actually free before spawning our own.
+    for (let i = 0; i < 10; i++) {
+      if (!(await checkConnection(localScope))) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  // Extract the onefile into app-owned storage instead of the OS temp dir —
+  // macOS purges /var/folders entries untouched ~3 days, which guts a
+  // long-running sidecar's lazy imports (Lais 2026-08-17, "Could not start
+  // sign-in"; docs/bugs/macos-onefile-tmp-purge-breaks-lazy-imports.md). The
+  // Rust command also sweeps _MEI* orphans left by hard kills. If prep fails
+  // we spawn with inherited env — the old behavior, not a new failure.
+  let tempEnv: Record<string, string> | undefined;
+  try {
+    const runtimeDir = await invoke<string>("prepare_backend_runtime");
+    tempEnv = { TMPDIR: runtimeDir, TMP: runtimeDir, TEMP: runtimeDir };
+  } catch (e) {
+    console.warn("[backend] runtime dir prep failed, using OS temp:", e);
+  }
 
   try {
-    const cmd = ShellCommand.sidecar(`binaries/${brand.sidecarName}`);
+    const cmd = ShellCommand.sidecar(`binaries/${brand.sidecarName}`, [], tempEnv ? { env: tempEnv } : undefined);
     cmd.on("close", (data) => {
       console.log(`[backend] exited with code ${data.code}`);
       backendProcess = null;

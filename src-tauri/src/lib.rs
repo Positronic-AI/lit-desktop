@@ -15,6 +15,45 @@ fn register_backend_pid(pid: u32, state: State<'_, BackendPid>) {
     println!("[shutdown] owning backend pid {pid}");
 }
 
+/// Create (and sweep) the app-owned dir the sidecar extracts into, returning
+/// its absolute path. The frontend points the sidecar's TMPDIR/TMP/TEMP here.
+///
+/// Why: the sidecar is a PyInstaller ONEFILE — it self-extracts to
+/// $TMPDIR/_MEIxxxxxx at launch and imports lazily from there for its whole
+/// lifetime. macOS purges /var/folders temp entries untouched for ~3 days, so a
+/// long-running backend gets gutted underneath itself: modules already imported
+/// keep working while first-time imports start throwing ModuleNotFoundError for
+/// files that verifiably shipped (Lais, 2026-08-17 — "Could not start sign-in";
+/// certifi's cacert.pem went the same way days earlier). systemd-tmpfiles ages
+/// /tmp on Linux too. App-owned storage is outside every OS temp sweeper.
+///
+/// The sweep: normal exits clean up _MEI dirs, but SIGKILLed backends leak
+/// them. This runs only from startBackend right before a spawn — i.e. when no
+/// healthy backend exists — so anything here is an orphan. Locked dirs (a live
+/// zombie on Windows) just fail their remove and are skipped.
+#[tauri::command]
+fn prepare_backend_runtime() -> Result<String, String> {
+    let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map_err(|e| format!("no home dir: {e}"))?;
+    let dir = std::path::Path::new(&home)
+        .join(".local")
+        .join("share")
+        .join("lit-desktop")
+        .join("runtime");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("_MEI") {
+                match std::fs::remove_dir_all(entry.path()) {
+                    Ok(()) => println!("[runtime] swept stale {:?}", entry.file_name()),
+                    Err(e) => println!("[runtime] skip {:?}: {e}", entry.file_name()),
+                }
+            }
+        }
+    }
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 /// Collect `root` plus every descendant, walking the ppid chain.
 ///
 /// Why a walk and not a process-group kill: the sidecar is a PyInstaller
@@ -122,6 +161,93 @@ fn reap(root: u32) {
         .output();
 }
 
+/// Kill a STALE ADOPTED sidecar: find who is listening on `port`, and reap it
+/// only when its process image matches our sidecar binary name. Called by
+/// `startBackend()` when an adopted backend reports the wrong wheel version
+/// (Lais 2026-08-17 — a reinstall adopted a two-week-old backend and every
+/// "fix" was served by the old code). A start.sh dev backend is a python
+/// process, never matches the prefix, and is always left alone.
+///
+/// Returns true only if something was actually reaped — the frontend keeps
+/// the stale backend when we can't (a stale backend still beats no backend).
+#[cfg(unix)]
+#[tauri::command]
+fn reap_backend_on_port(port: u16, expected_prefix: String) -> bool {
+    let Ok(out) = std::process::Command::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .output()
+    else {
+        return false;
+    };
+    let pids: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    let mut any = false;
+    for pid in pids {
+        let comm = std::process::Command::new("ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let base = comm.rsplit('/').next().unwrap_or("");
+        if base.starts_with(&expected_prefix) {
+            println!("[adopt] reaping stale sidecar {base} (pid {pid}) on :{port}");
+            reap(pid);
+            any = true;
+        } else {
+            println!("[adopt] listener on :{port} is {base:?}, not ours — leaving it");
+        }
+    }
+    any
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn reap_backend_on_port(port: u16, expected_prefix: String) -> bool {
+    let Ok(out) = std::process::Command::new("netstat").args(["-ano", "-p", "TCP"]).output() else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let needle = format!(":{port}");
+    let mut seen: Vec<u32> = Vec::new();
+    let mut any = false;
+    for line in text.lines() {
+        if !line.contains("LISTENING") {
+            continue;
+        }
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 5 || !cols[1].ends_with(&needle) {
+            continue;
+        }
+        let Ok(pid) = cols[4].parse::<u32>() else { continue };
+        if pid == 0 || seen.contains(&pid) {
+            continue;
+        }
+        seen.push(pid);
+        // tasklist CSV: "Image Name","PID",...
+        let image = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches('"')
+            .split('"')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if image.to_lowercase().starts_with(&expected_prefix.to_lowercase()) {
+            println!("[adopt] reaping stale sidecar {image} (pid {pid}) on :{port}");
+            reap(pid);
+            any = true;
+        } else {
+            println!("[adopt] listener on :{port} is {image:?}, not ours — leaving it");
+        }
+    }
+    any
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // WebKitGTK's DMA-BUF renderer has a known heap-corruption crash family
@@ -141,7 +267,11 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_websocket::init())
         .manage(BackendPid::default())
-        .invoke_handler(tauri::generate_handler![register_backend_pid])
+        .invoke_handler(tauri::generate_handler![
+            register_backend_pid,
+            prepare_backend_runtime,
+            reap_backend_on_port
+        ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         // Closing the app must take its subprocesses with it — the JS

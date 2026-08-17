@@ -74,6 +74,11 @@ jobs:
             python install.py
           fi
           pyinstaller --noconfirm lit-server.spec
+          # Bake the ACTUAL installed wheel version into the frontend build
+          # (vite reads VITE_LIB_VERSION) — the adopt-case handshake compares
+          # it against the running backend's /health version. Resolved from
+          # the venv, not inputs.lib_version, so "latest" works too.
+          echo "VITE_LIB_VERSION=$(python -c 'import importlib.metadata as m; print(m.version("positronic-lit"))')" >> "$GITHUB_ENV"
 
       - name: Stage the frozen backend as the Tauri sidecar
         run: |
