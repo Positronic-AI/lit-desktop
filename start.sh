@@ -120,4 +120,8 @@ for i in $(seq 1 30); do
 done
 
 echo "==> Launching (watch for 'VITE ready' + 'Local: http://localhost:1420/')…"
+# Full backtraces on Rust panics — the recurring Rc-race crash (docs/bugs/
+# tauri-detachedwindow-rc-race-desktop-crash.md) then self-documents instead
+# of needing core-dump surgery.
+export RUST_BACKTRACE=full
 npm run tauri dev
