@@ -24,12 +24,15 @@ jobs:
     runs-on: windows-latest # x86_64-pc-windows-msvc
     permissions:
       contents: write # to publish the release
+      id-token: write # OIDC token for Azure Trusted Signing (no stored secret)
     defaults:
       run:
         shell: bash # bash for parity with build-brand.sh; Git Bash ships on the runner
     env:
       # Auto-incrementing build version: each run bumps the patch. Override via input.
       LIT_BUILD_VERSION: ${{ inputs.version || format('2.0.{0}', github.run_number) }}
+      # Presence of this secret turns code signing on (see the signing steps).
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
     steps:
       - name: Checkout lit-desktop
         uses: actions/checkout@v4
@@ -97,6 +100,46 @@ jobs:
         run: |
           npm install
           ./scripts/build-brand.sh "${{ inputs.brand }}"
+
+      # Code signing (Azure Trusted Signing, publisher "Positronic AI"). Self-
+      # disables until the three AZURE_* secrets exist, so forks and dev runs
+      # keep producing unsigned installers. Identity: Entra app
+      # "lit-desktop-code-signing" (OIDC, federated to this repo's main branch)
+      # holding "Artifact Signing Certificate Profile Signer" on the account.
+      # Rung 1 signs the INSTALLERS (what SmartScreen judges on download).
+      # Rung 2 (TODO): sign the inner binaries too via tauri's
+      # bundle.windows.signCommand — see docs/runbooks/code-signing.md.
+      - name: Azure login (OIDC)
+        if: env.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign installers (Azure Trusted Signing)
+        if: env.AZURE_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0
+        with:
+          endpoint: https://eus.codesigning.azure.net/
+          trusted-signing-account-name: positronic
+          certificate-profile-name: positronic-public
+          files-folder: src-tauri/target/release/bundle
+          files-folder-filter: msi,exe
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
 
       - name: Upload installer artifacts
         uses: actions/upload-artifact@v4

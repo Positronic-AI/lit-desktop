@@ -212,7 +212,14 @@ function parseMessageContent(raw: string): ParsedContent {
   // Walk content character-by-character, extracting tool calls, results, thinking
   const rawParts: ContentPart[] = [];
   let currentPos = 0;
-  let lastToolCall: ToolCall | null = null;
+  // FIFO of tool calls awaiting a result. Parallel tool calls arrive as N
+  // calls THEN N results (one assistant message with N tool_use blocks, then
+  // one user message with N tool_result blocks), so a single "last call"
+  // pointer attached only the last call's result and dropped the rest —
+  // leaving those tools with no .result, so the group's spinner spun forever
+  // even though the turn was done (Katie/TCF #13, "13 actions" on a finished
+  // Susan G. Komen report). Attach each result to the OLDEST unresulted call.
+  const pendingToolCalls: ToolCall[] = [];
 
   while (currentPos < content.length) {
     const jsonStart = content.indexOf("\x02TOOLJSON", currentPos);
@@ -279,7 +286,7 @@ function parseMessageContent(raw: string): ParsedContent {
               paramPreview: getParamPreview(toolName, toolInput),
               params,
             };
-            lastToolCall = tool;
+            pendingToolCalls.push(tool);
             rawParts.push({ type: "tool", tool });
           }
         } catch {
@@ -292,9 +299,9 @@ function parseMessageContent(raw: string): ParsedContent {
       if (resultEnd === -1) break;
 
       const resultContent = content.slice(next.pos + "[TOOL_RESULT]".length, resultEnd).trim();
-      if (lastToolCall) {
-        lastToolCall.result = resultContent;
-        lastToolCall = null;
+      const awaiting = pendingToolCalls.shift();
+      if (awaiting) {
+        awaiting.result = resultContent;
       }
       currentPos = resultEnd + "[/TOOL_RESULT]".length;
     } else if (next.type === "thinking") {
@@ -2958,6 +2965,20 @@ export class ChatPanel {
       }
 
       this.streamingEl.classList.remove("streaming");
+
+      // Re-pin to the bottom. This final rebuild swaps the streamed scrape for
+      // the clean JSONL content and adds collapsible tool sections + the links
+      // row, which changes the bubble's height — the streaming path kept us at
+      // the bottom, but without this the height shift on the last frame strands
+      // the view above it (worse with lots of output → more tool sections).
+      // Katie/Ben, 2026-08-21: "have to press down / scroll to the bottom." The
+      // rAF pass catches the height after layout settles.
+      if (!this.userIsScrolledUp) {
+        this.scrollToBottom();
+        requestAnimationFrame(() => {
+          if (!this.userIsScrolledUp) this.scrollToBottom();
+        });
+      }
     }
     this.streamingEl = null;
     this.streamingText = "";

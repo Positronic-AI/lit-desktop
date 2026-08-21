@@ -133,7 +133,10 @@ body {
   margin-top: 4px;
   border-left: none;
   border-top: 1px solid var(--border);
-  padding-left: 6px;
+  /* Horizontal padding must stay symmetric or the centered gear drifts right
+     of the + above it (Ben, 2026-08-21 VM QA). The separator is the border-top;
+     the gap below it is padding-top, not padding-left. */
+  padding-left: 0;
   padding-top: 6px;
 }
 

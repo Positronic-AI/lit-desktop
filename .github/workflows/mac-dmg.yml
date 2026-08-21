@@ -32,6 +32,17 @@ jobs:
     env:
       # Auto-incrementing build version: each run bumps the patch. Override via input.
       LIT_BUILD_VERSION: ${{ inputs.version || format('2.0.{0}', github.run_number) }}
+      # Code signing + notarization (Developer ID, team "Positronic AI"). Tauri
+      # reads these and signs the .app, the sidecar and the bridge, then
+      # notarizes the .dmg. All empty => unsigned build, exactly as before.
+      # Secrets: docs/runbooks/code-signing.md.
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
     steps:
       - name: Checkout lit-desktop
         uses: actions/checkout@v4
@@ -56,13 +67,37 @@ jobs:
           ref: main
           path: lit-bridge-rs-src
 
+      - name: Import signing certificate + notarization key
+        if: env.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          # Tauri imports APPLE_CERTIFICATE into its own keychain for the .app;
+          # the bridge/sidecar steps above sign BEFORE tauri runs, so the cert
+          # must also be in a keychain codesign can find now.
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p "" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "" "$KC"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KC"
+          security list-keychain -d user -s "$KC" login.keychain-db
+          echo "$APPLE_API_KEY_CONTENT" > "$APPLE_API_KEY_PATH"
+        env:
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+
       - name: Build + ad-hoc sign the native bridge
         run: |
           cargo build --release --manifest-path "$GITHUB_WORKSPACE/lit-bridge-rs-src/Cargo.toml"
           BIN="$GITHUB_WORKSPACE/lit-bridge-rs-src/target/release/lit-bridge-rs"
           # Ad-hoc sign so Apple Silicon will exec it as a subprocess. Standalone
           # binary (no dylib loading from us), so plain ad-hoc is sufficient.
-          codesign --force --sign - --timestamp=none "$BIN"
+          if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            # Real signing run: Developer ID + hardened runtime + timestamp,
+            # otherwise notarization rejects the bundle for this binary.
+            codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$BIN"
+          else
+            codesign --force --sign - --timestamp=none "$BIN"
+          fi
           # The PyInstaller spec bundles this verbatim (datas) so the signature
           # survives; the entry point resolves it and sets LIT_BRIDGE_RS_BIN.
           echo "LIT_BRIDGE_RS_BUNDLE=$BIN" >> "$GITHUB_ENV"
