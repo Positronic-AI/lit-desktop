@@ -42,7 +42,6 @@ jobs:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
     steps:
       - name: Checkout lit-desktop
         uses: actions/checkout@v4
@@ -81,7 +80,12 @@ jobs:
           security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KC"
           security list-keychain -d user -s "$KC" login.keychain-db
-          echo "$APPLE_API_KEY_CONTENT" > "$APPLE_API_KEY_PATH"
+          # runner.temp is only valid at step level, not job-level env — a
+          # job-level `${{ runner.temp }}` makes the whole workflow unparseable
+          # and every dispatch 422s (this bit 2.5.8's mac builds, 2026-08-21).
+          KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          echo "$APPLE_API_KEY_CONTENT" > "$KEY_PATH"
+          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
         env:
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
 
