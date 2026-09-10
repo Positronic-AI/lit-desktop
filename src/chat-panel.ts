@@ -32,8 +32,6 @@ import {
   clearInterrupt,
   getInterrupt,
   fetchUsage,
-  fetchAgentCapabilities,
-  type AgentCapabilities,
   toggleChannelReaction,
   createTelemetryWebSocket,
   type Reaction,
@@ -42,6 +40,7 @@ import {
   listCredentials,
   type Credential,
   cancelStream,
+  restartChannelSession,
   uploadImage,
   uploadFile,
   uploadPath,
@@ -941,7 +940,6 @@ export class ChatPanel {
   private channelList!: HTMLDivElement;
   private channelTitle!: HTMLHeadingElement;
   private channelActionsEl!: HTMLDivElement;
-  private agentTabsEl!: HTMLDivElement;
   private agentInfoEl!: HTMLDivElement;
   private sidebarEl!: HTMLElement;
   private sidebarResizeHandle!: HTMLDivElement;
@@ -952,7 +950,9 @@ export class ChatPanel {
   private scrollBtn!: HTMLElement;
   private contentHeader!: HTMLElement;
   private inputRow!: HTMLDivElement;
-  private terminalToggleBtn!: HTMLButtonElement;
+  /** Terminal toggle lives in the composer row now (re-rendered with it). */
+  private terminalToggleBtn: HTMLButtonElement | null = null;
+  private terminalActive = false;
 
   private readonly visibilityHandler = () => {
     if (document.visibilityState === "visible" && this.currentChannel) {
@@ -1039,7 +1039,6 @@ export class ChatPanel {
     this.channelList = q<HTMLDivElement>(".channel-list");
     this.channelTitle = q<HTMLHeadingElement>(".channel-title");
     this.channelActionsEl = q<HTMLDivElement>(".channel-actions");
-    this.agentTabsEl = q<HTMLDivElement>(".agent-tabs");
     this.agentInfoEl = q<HTMLDivElement>(".agent-info");
     this.sidebarEl = q<HTMLElement>(".sidebar");
     this.sidebarResizeHandle = q<HTMLDivElement>(".sidebar-resize-handle");
@@ -1050,22 +1049,60 @@ export class ChatPanel {
     this.scrollBtn = q<HTMLElement>(".scroll-to-bottom");
     this.contentHeader = q<HTMLElement>(".content-header");
     this.inputRow = q<HTMLDivElement>(".input-row");
-    this.terminalToggleBtn = q<HTMLButtonElement>(".terminal-toggle-btn");
   }
 
+  /** Pinned-to-bottom mode (2026-09-10). Anything that grows the transcript
+   *  after the last programmatic scroll — markdown/tool sections laying out,
+   *  images loading, the composer row appearing, the dock resizing — used to
+   *  strand the view a little above the bottom on first load, and casual users
+   *  never found the ↓ button. Now every message element and the container are
+   *  observed; while the user hasn't scrolled up, any height change re-pins. */
+  private pinObserver: ResizeObserver | null = null;
+
+  private observeForPin(el: Element): void {
+    this.pinObserver?.observe(el);
+  }
+
+  private lastScrollTop = 0;
+
   private wireEvents(): void {
+    // Only an UPWARD scroll can unpin. A programmatic scroll-to-bottom fires
+    // the same event, and on first load it arrived while later bubbles were
+    // still growing the transcript, so the handler measured a gap and flipped
+    // userIsScrolledUp — after which nothing re-pinned (Ben, 2026-09-10).
     this.messagesEl.addEventListener("scroll", () => {
-      this.userIsScrolledUp = !this.isNearBottom();
+      const top = this.messagesEl.scrollTop;
+      const movedUp = top < this.lastScrollTop - 1;
+      this.lastScrollTop = top;
+      if (movedUp) {
+        this.userIsScrolledUp = !this.isNearBottom();
+      } else if (this.isNearBottom()) {
+        this.userIsScrolledUp = false;
+      }
       this.updateScrollButton();
     });
+    if (typeof ResizeObserver !== "undefined") {
+      this.pinObserver = new ResizeObserver(() => {
+        if (!this.userIsScrolledUp) {
+          this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+          this.lastScrollTop = this.messagesEl.scrollTop;
+        }
+      });
+      this.pinObserver.observe(this.messagesEl);
+    }
+    // Images finish loading after their bubble was measured — `load` doesn't
+    // bubble, so catch it in the capture phase.
+    this.messagesEl.addEventListener("load", () => {
+      if (!this.userIsScrolledUp) this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+    }, true);
 
     this.scrollBtn.addEventListener("click", () => this.scrollToBottom());
 
-    // Header buttons whose behavior lives outside the panel (search dock panel,
-    // terminal overlay) — main.ts provides the handlers.
+    // Header button whose behavior lives outside the panel (search dock panel)
+    // — main.ts provides the handler. The terminal toggle moved into the
+    // composer row (see renderAgentInfo).
     (this.root!.querySelector(".search-toggle-btn") as HTMLElement)
       .addEventListener("click", () => this.onOpenSearch?.());
-    this.terminalToggleBtn.addEventListener("click", () => this.onToggleTerminal?.());
 
     // With the nav hidden, the channel title doubles as the channel selector.
     this.channelTitle.addEventListener("click", (e) => {
@@ -1259,8 +1296,9 @@ export class ChatPanel {
     return mergeChannels(this.localChannels, this.channelListCache);
   }
 
-  /** Active-state for the terminal toggle button in this panel's header. */
+  /** Active-state for the terminal toggle button in this panel's composer row. */
   setTerminalButtonActive(active: boolean): void {
+    this.terminalActive = active;
     this.terminalToggleBtn?.classList.toggle("active", active);
   }
 
@@ -1277,6 +1315,7 @@ export class ChatPanel {
 
   scrollToBottom(): void {
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+    this.lastScrollTop = this.messagesEl.scrollTop;
     this.userIsScrolledUp = false;
     this.updateScrollButton();
   }
@@ -1573,6 +1612,7 @@ export class ChatPanel {
     if (msg.id) this.renderReactionsRow(el, msg.id);
 
     this.messagesEl.appendChild(el);
+    this.observeForPin(el);
     // Keep the auth card pinned below the newest message (like streamingEl).
     if (this.authBannerEl) this.messagesEl.appendChild(this.authBannerEl);
 
@@ -1758,7 +1798,7 @@ export class ChatPanel {
     this.messagesEl.appendChild(wrap);
   }
 
-  // --- Agent tabs ---
+  // --- Addressee ("To:") control ---
 
   private getPresenceClass(agent: Agent): string {
     const throttle = this.agentThrottles[agent.id];
@@ -1768,50 +1808,91 @@ export class ChatPanel {
     return "idle";
   }
 
+  /**
+   * The agent tab strip is retired (2026-09-10): the addressee is now the
+   * "To:" pill at the head of the composer row, rendered by renderAgentInfo.
+   * Kept as an alias so the existing call sites re-render the row unchanged.
+   */
   private renderAgentTabs(): void {
-    this.agentTabsEl.innerHTML = "";
+    this.renderAgentInfo();
+  }
 
-    for (const agent of this.agents) {
-      // Star-to-hide (webapp parity): hidden agents get no tab in this place —
-      // the cure for "accidentally asked the abodoo agent a fitness question".
-      // The ACTIVE agent always shows (a channel bound to a hidden agent must
-      // never look unattended).
-      if (this.hiddenAgents.has(agent.id) && this.currentAgent?.id !== agent.id) continue;
-      const tab = document.createElement("div");
-      tab.className = "agent-tab";
-      if (this.currentAgent?.id === agent.id) tab.classList.add("active");
+  /** Agents offered in this place: hidden ones stay out, the active one always shows. */
+  private visibleAgents(): Agent[] {
+    return this.agents.filter((a) => !this.hiddenAgents.has(a.id) || this.currentAgent?.id === a.id);
+  }
 
-      const presenceClass = this.getPresenceClass(agent);
-      tab.innerHTML = `<span class="status-indicator ${presenceClass}"></span><span>${escapeHtml(agent.name)}</span>`;
+  private renderToControl(agent: Agent): HTMLButtonElement {
+    const btn = document.createElement("button");
+    btn.className = "to-pill";
+    btn.title = "Addressee";
+    btn.innerHTML =
+      `<span class="to-label">To:</span>` +
+      `<span class="status-indicator ${this.getPresenceClass(agent)}"></span>` +
+      `<span class="to-name">${escapeHtml(agent.name)}</span>` +
+      `<svg class="model-chevron" viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 10l5 5 5-5z"></path></svg>`;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.showAddresseeMenu(e);
+    });
+    return btn;
+  }
 
-      tab.addEventListener("click", () => this.selectAgent(agent));
-      // Runtime heartbeat controls (enable/disable/safe/pause) — the old
-      // composer heart button, relocated out of prime real estate.
-      tab.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        this.showThrottleMenu(e, agent, this.agentThrottles[agent.id] || "disabled");
-      });
-      this.agentTabsEl.appendChild(tab);
-    }
+  private showAddresseeMenu(event: MouseEvent): void {
+    closeContextMenu();
+    const menu = document.createElement("div");
+    menu.className = "context-menu to-menu";
 
-    const addBtn = document.createElement("div");
-    addBtn.className = "agent-tab-add";
-    addBtn.textContent = "+";
-    addBtn.title = "Add agent";
-    addBtn.addEventListener("click", () => openSettings(() => this.onReload?.(), { tab: "agents", agentId: "new" }));
-    this.agentTabsEl.appendChild(addBtn);
-
-    if (this.agents.length > 1) {
-      const visBtn = document.createElement("div");
-      visBtn.className = "agent-tab-add agent-vis-btn";
-      visBtn.textContent = "☆";
-      visBtn.title = "Choose which agents appear here";
-      visBtn.addEventListener("click", (e) => {
+    for (const agent of this.visibleAgents()) {
+      const row = document.createElement("div");
+      row.className = "context-menu-item to-menu-row";
+      const isCurrent = this.currentAgent?.id === agent.id;
+      if (isCurrent) row.classList.add("active");
+      row.innerHTML =
+        `<span class="status-indicator ${this.getPresenceClass(agent)}"></span>` +
+        `<span class="to-menu-name">${escapeHtml(agent.name)}</span>` +
+        (isCurrent ? `<span class="menu-check">✓</span>` : "");
+      row.addEventListener("click", (e) => {
         e.stopPropagation();
-        this.showAgentVisibilityMenu(e);
+        closeContextMenu();
+        this.selectAgent(agent);
       });
-      this.agentTabsEl.appendChild(visBtn);
+      menu.appendChild(row);
     }
+
+    const divider = () => {
+      const sep = document.createElement("div");
+      sep.className = "context-menu-divider";
+      menu.appendChild(sep);
+    };
+    const item = (label: string, action: () => void) => {
+      const row = document.createElement("div");
+      row.className = "context-menu-item to-menu-action";
+      row.textContent = label;
+      row.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeContextMenu();
+        action();
+      });
+      menu.appendChild(row);
+    };
+
+    divider();
+    // Star-to-hide state is kept (webapp parity); the ☆ menu is gone, so the
+    // way back is a single "show them all" action.
+    if (this.hiddenAgents.size > 0) {
+      item("Show hidden agents", () => {
+        this.hiddenAgents.clear();
+        this.saveAgentVisibility();
+        this.renderAgentInfo();
+      });
+      divider();
+    }
+    item("New agent…", () => openSettings(() => this.onReload?.(), { tab: "agents", agentId: "new" }));
+
+    document.body.appendChild(menu);
+    positionMenuNear(menu, event);
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
   }
 
   // --- Agent visibility (star-to-hide, per place — webapp parity) ---
@@ -1829,36 +1910,8 @@ export class ChatPanel {
     }
   }
 
-  private showAgentVisibilityMenu(event: MouseEvent): void {
-    closeContextMenu();
-    const menu = document.createElement("div");
-    menu.className = "context-menu agent-vis-menu";
-    const head = document.createElement("div");
-    head.className = "context-menu-item info menu-section-label";
-    head.textContent = `Agents in ${this.scope.team} · ${this.scope.connection.name}`;
-    menu.appendChild(head);
-    for (const agent of this.agents) {
-      const row = document.createElement("div");
-      row.className = "context-menu-item agent-vis-row";
-      const star = document.createElement("span");
-      star.className = "agent-vis-star";
-      star.textContent = this.hiddenAgents.has(agent.id) ? "☆" : "★";
-      const name = document.createElement("span");
-      name.textContent = agent.name;
-      row.append(star, name);
-      row.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (this.hiddenAgents.has(agent.id)) this.hiddenAgents.delete(agent.id);
-        else this.hiddenAgents.add(agent.id);
-        localStorage.setItem(this.agentVisKey(), JSON.stringify([...this.hiddenAgents]));
-        star.textContent = this.hiddenAgents.has(agent.id) ? "☆" : "★";
-        this.renderAgentTabs();
-      });
-      menu.appendChild(row);
-    }
-    document.body.appendChild(menu);
-    positionMenuNear(menu, event);
-    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
+  private saveAgentVisibility(): void {
+    localStorage.setItem(this.agentVisKey(), JSON.stringify([...this.hiddenAgents]));
   }
 
   private renderAgentInfo(): void {
@@ -1870,22 +1923,15 @@ export class ChatPanel {
     const agent = this.currentAgent;
     const throttle = this.agentThrottles[agent.id] || "disabled";
     const models = this.backendModels[agent.backend] || [];
-    const usage = this.usageReports[agent.backend];
+    const usage = this.usageReports[agent.id];
 
     this.agentInfoEl.innerHTML = "";
-    // The heartbeat throttle no longer lives here — durable on/off is in agent
-    // settings ("Listening"), and the runtime menu (safe mode / pause) opens
-    // from a right-click on the agent tab. It was composer-adjacent only as an
-    // emergency brake from the early heartbeat days.
-    void throttle;
+    this.terminalToggleBtn = null;
 
-    // Settings icon button
-    const settingsBtn = document.createElement("button");
-    settingsBtn.className = "agent-ctrl-btn settings-btn";
-    settingsBtn.title = "Agent settings";
-    settingsBtn.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>`;
-    settingsBtn.addEventListener("click", () => openSettings(() => this.onReload?.(), { tab: "agents", agentId: agent.id }));
-    this.agentInfoEl.appendChild(settingsBtn);
+    // Composer controls row (2026-09-10), left to right:
+    //   To: ● agent ▾ · model ▾ · usage bars (flex) · caps chips | >_ · ⚙
+    // The addressee pill replaces the old agent tab strip.
+    this.agentInfoEl.appendChild(this.renderToControl(agent));
 
     // Model selector button (flat text + chevron, opens dropdown)
     // In a channel, a per-channel override (if set) takes effect instead of the agent default.
@@ -1923,106 +1969,70 @@ export class ChatPanel {
       }
     }
 
-    // Capability chips — what this agent can do right now (skills + MCP
-    // tools), resolved server-side the same way dispatch resolves it. Counts
-    // at a glance; click for the list. Right-aligned via CSS margin.
-    const chipsDiv = document.createElement("div");
-    chipsDiv.className = "caps-chips";
-    this.agentInfoEl.appendChild(chipsDiv);
-    void this.loadCapabilityChips(agent, chipsDiv);
+    // Capability chips (skills/tools counts) were removed from the composer on
+    // 2026-09-10: jargon to a casual user; the list lives in agent settings.
+
+    // Power trio, behind a thin rule: live terminal + the agent menu (settings,
+    // heartbeat modes, restart session). Both used to live elsewhere — the
+    // terminal in the channel header, the heartbeat menu on a tab right-click.
+    const divider = document.createElement("div");
+    divider.className = "power-divider";
+    this.agentInfoEl.appendChild(divider);
+
+    const termBtn = document.createElement("button");
+    termBtn.className = "agent-ctrl-btn power-btn terminal-toggle-btn";
+    termBtn.title = "Toggle live terminal";
+    termBtn.textContent = ">_";
+    termBtn.classList.toggle("active", this.terminalActive);
+    termBtn.addEventListener("click", () => this.onToggleTerminal?.());
+    this.agentInfoEl.appendChild(termBtn);
+    this.terminalToggleBtn = termBtn;
+
+    const settingsBtn = document.createElement("button");
+    settingsBtn.className = "agent-ctrl-btn power-btn settings-btn";
+    settingsBtn.title = "Agent menu";
+    settingsBtn.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>`;
+    settingsBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.showAgentMenu(e, agent, throttle);
+    });
+    this.agentInfoEl.appendChild(settingsBtn);
   }
 
-  private async loadCapabilityChips(agent: Agent, container: HTMLDivElement): Promise<void> {
-    let caps: AgentCapabilities;
-    try {
-      caps = await fetchAgentCapabilities(agent.id, this.currentChannel?.id, this.scope);
-    } catch {
-      return; // older server without the endpoint — chips simply don't appear
-    }
-    if (!container.isConnected) return; // row re-rendered while we fetched
-    container.innerHTML = "";
-    const mkChip = (label: string, section: "skills" | "tools"): void => {
-      const chip = document.createElement("button");
-      chip.className = "caps-chip";
-      chip.textContent = label;
-      chip.title = "What this agent can do in this channel";
-      chip.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.showCapabilitiesMenu(e, caps, section);
-      });
-      container.appendChild(chip);
-    };
-    mkChip(`✦ ${caps.skills.length} skill${caps.skills.length === 1 ? "" : "s"}`, "skills");
-    mkChip(`⚒ ${caps.mcp_servers.length} tool${caps.mcp_servers.length === 1 ? "" : "s"}`, "tools");
-  }
 
-  private showCapabilitiesMenu(event: MouseEvent, caps: AgentCapabilities, focus: "skills" | "tools"): void {
+  /**
+   * The gear menu: agent settings, the runtime heartbeat modes (formerly the
+   * tab right-click "throttle" menu), and Restart Session.
+   */
+  private showAgentMenu(event: MouseEvent, agent: Agent, current: ThrottleState): void {
     closeContextMenu();
     const menu = document.createElement("div");
-    menu.className = "context-menu caps-menu";
+    menu.className = "context-menu throttle-menu agent-menu";
 
-    const section = (label: string, rows: { title: string; hint?: string; badge?: string }[]) => {
-      const head = document.createElement("div");
-      head.className = "context-menu-item info menu-section-label";
-      head.textContent = label;
-      menu.appendChild(head);
-      if (rows.length === 0) {
-        const empty = document.createElement("div");
-        empty.className = "context-menu-item info";
-        empty.textContent = "none";
-        menu.appendChild(empty);
-      }
-      for (const r of rows) {
-        const row = document.createElement("div");
-        row.className = "context-menu-item info caps-row";
-        const name = document.createElement("span");
-        name.textContent = r.title;
-        row.appendChild(name);
-        if (r.badge) {
-          const badge = document.createElement("span");
-          badge.className = "caps-src";
-          badge.textContent = r.badge;
-          row.appendChild(badge);
-        }
-        if (r.hint) row.title = r.hint;
-        menu.appendChild(row);
-      }
+    const divider = () => {
+      const sep = document.createElement("div");
+      sep.className = "context-menu-divider";
+      menu.appendChild(sep);
     };
 
-    const skillRows = caps.skills.map((s) => ({
-      title: s.name,
-      hint: s.description || undefined,
-      badge: s.source === "personal" ? "personal" : undefined,
-    }));
-    const toolRows = caps.mcp_servers.map((m) => ({
-      title: m.name,
-      badge: m.source !== "agent" ? m.source : undefined,
-    }));
-
-    if (focus === "skills") {
-      section("Skills", skillRows);
-      section("Tools (MCP)", toolRows);
-    } else {
-      section("Tools (MCP)", toolRows);
-      section("Skills", skillRows);
-    }
-
-    document.body.appendChild(menu);
-    positionMenuNear(menu, event);
-    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
-  }
-
-  private showThrottleMenu(event: MouseEvent, agent: Agent, current: ThrottleState): void {
-    closeContextMenu();
-    const menu = document.createElement("div");
-    menu.className = "context-menu throttle-menu";
+    const settings = document.createElement("div");
+    settings.className = "context-menu-item";
+    settings.textContent = "Agent settings…";
+    settings.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeContextMenu();
+      openSettings(() => this.onReload?.(), { tab: "agents", agentId: agent.id });
+    });
+    menu.appendChild(settings);
+    divider();
 
     const states: ThrottleState[] = ["disabled", "enabled", "safe", "stopped"];
     for (const state of states) {
       const row = document.createElement("div");
       row.className = "context-menu-item throttle-menu-item";
       if (state === current) row.classList.add("active");
-      row.innerHTML = `<span class="throttle-menu-icon" style="color:${THROTTLE_COLOR[state]}">${THROTTLE_SVG[state]}</span><span>${THROTTLE_LABEL[state]}</span>`;
+      row.innerHTML = `<span class="throttle-menu-icon" style="color:${THROTTLE_COLOR[state]}">${THROTTLE_SVG[state]}</span><span>${THROTTLE_LABEL[state]}</span>` +
+        (state === current ? `<span class="menu-check">✓</span>` : "");
       row.addEventListener("click", (e) => {
         e.stopPropagation();
         closeContextMenu();
@@ -2031,9 +2041,61 @@ export class ChatPanel {
       menu.appendChild(row);
     }
 
+    // "Restart Session" acts on the current channel's live CLI session (the
+    // one this agent answers in).
+    divider();
+    const restart = document.createElement("div");
+    restart.className = "context-menu-item";
+    restart.textContent = "Restart Session";
+    restart.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeContextMenu();
+      void this.restartCurrentSession();
+    });
+    menu.appendChild(restart);
+
     document.body.appendChild(menu);
     positionMenuNear(menu, event);
     setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
+  }
+
+  /**
+   * "Restart Session" (2026-09-10): end the current channel's live CLI session
+   * so the next message spawns a fresh Claude Code and the conversation
+   * continues from its resume id. The server refuses (409) mid-reply; we check
+   * our own stream state first so the common case never round-trips. The
+   * server writes a system note into the channel — normal message delivery
+   * renders it, nothing to do here.
+   */
+  private async restartCurrentSession(): Promise<void> {
+    const ch = this.currentChannel;
+    if (!ch) return;
+    if (this.streamingChannels.has(ch.id) || this.activeStreamId) {
+      this.showToast("Wait for the reply, then restart", "warn");
+      return;
+    }
+    // No confirmation: the action destroys nothing (resume id is stashed), and
+    // the channel shows a system line saying what happened (Ben, 2026-09-10).
+    try {
+      const r = await restartChannelSession(ch.id, this.scope);
+      if (r.status === "restarted") {
+        this.showToast("Session restarted — it resumes on your next message");
+      } else {
+        this.showToast(r.detail || "No live session to restart", "warn");
+      }
+    } catch (err: any) {
+      this.showToast(err?.message || "Restart failed", "warn");
+    }
+  }
+
+  /** Transient notice in the channel header (same slot as the reconnect pill). */
+  private showToast(text: string, kind: "info" | "warn" = "info"): void {
+    this.root?.querySelector(".chat-toast")?.remove();
+    const t = document.createElement("div");
+    t.className = `chat-toast${kind === "warn" ? " warn" : ""}`;
+    t.textContent = text;
+    this.contentHeader.appendChild(t);
+    setTimeout(() => t.remove(), kind === "warn" ? 8000 : 5000);
   }
 
   private showModelMenu(event: MouseEvent, agent: Agent, models: BackendModel[], effectiveModel: string): void {
@@ -2296,6 +2358,7 @@ export class ChatPanel {
     localStorage.setItem("lit-desktop-agent", agent.id);
     await this.loadAgentThrottle(agent);
     void this.checkAgentAuth();
+    if (!this.usageReports[agent.id]) void this.refreshCurrentUsage();
 
     if (this.currentChannel) {
       try {
@@ -2638,6 +2701,10 @@ export class ChatPanel {
         }
       }
 
+      // Land at the true bottom once layout has settled (fonts, code blocks,
+      // the composer row) — the observers keep it there afterwards.
+      this.scrollToBottom();
+      requestAnimationFrame(() => requestAnimationFrame(() => this.scrollToBottom()));
       // Non-fatal: a mark-read failure must not masquerade as a load failure.
       markChannelRead(channel.id, this.scope).catch(() => {});
       this.connectWebSocket(channel.id);
@@ -2710,6 +2777,7 @@ export class ChatPanel {
               });
               if (this.streamingEl && data.direction === "in") {
                 this.messagesEl.appendChild(this.streamingEl);
+      this.observeForPin(this.streamingEl);
               }
             }
             if (document.visibilityState === "visible") {
@@ -2875,6 +2943,7 @@ export class ChatPanel {
     const who = this.currentAgent?.name || "Agent";
     el.innerHTML = `<div class="message-header"><span class="message-author">${escapeHtml(who)}</span><span class="message-time">now</span></div><div class="message-content"><span class="typing-dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span></div>`;
     this.messagesEl.appendChild(el);
+    this.observeForPin(el);
     if (!this.userIsScrolledUp) this.scrollToBottom();
     this.streamingEl = el;
   }
@@ -3250,6 +3319,7 @@ export class ChatPanel {
     this.renderMessage({ role: "user", content, timestamp: new Date().toISOString() });
     if (this.streamingEl) {
       this.messagesEl.appendChild(this.streamingEl);
+      this.observeForPin(this.streamingEl);
     }
 
     try {
@@ -3259,13 +3329,22 @@ export class ChatPanel {
       // panel has registered context — plain messages stay plain. The local
       // echo above renders the clean text; the renderer strips <context>
       // blocks from history on reload, so the envelope is agent-facing only.
+      // The selected agent tab is the ADDRESSEE: stamp target_agent_id so the
+      // stimulus layer wakes only that participant (shared rooms — addressed
+      // stimulus, docs/plans/org-policy.md). The webapp has always sent it;
+      // the desktop didn't, which is one reason multi-agent channels stormed.
       let outgoing = content;
       const widgets = getWidgetContexts();
-      if (widgets.length > 0) {
-        const envelope = {
-          trigger: { type: "user_message", channel_id: this.currentChannel.id },
-          widgets,
+      const targetAgentId = this.currentAgent?.id || null;
+      if (widgets.length > 0 || targetAgentId) {
+        const envelope: Record<string, any> = {
+          trigger: {
+            type: "user_message",
+            channel_id: this.currentChannel.id,
+            ...(targetAgentId ? { target_agent_id: targetAgentId } : {}),
+          },
         };
+        if (widgets.length > 0) envelope.widgets = widgets;
         outgoing = `<context>\n${JSON.stringify(envelope, null, 2)}\n</context>\n\n${content}`;
       }
       await postChannelMessage(this.currentChannel.id, outgoing, this.scope);
@@ -3297,6 +3376,25 @@ export class ChatPanel {
     }
   }
 
+  private usagePollTimer: number | null = null;
+
+  /** Keep the current agent's usage meter fresh (the server caches; this just
+   *  re-reads it). Previously the desktop only fetched usage at startup and on
+   *  agent reload, so a meter that started empty stayed empty. */
+  private startUsagePolling(): void {
+    if (this.usagePollTimer !== null) return;
+    this.usagePollTimer = window.setInterval(() => void this.refreshCurrentUsage(), 5 * 60 * 1000);
+  }
+
+  private async refreshCurrentUsage(): Promise<void> {
+    const agent = this.currentAgent;
+    if (!agent) return;
+    try {
+      this.usageReports[agent.id] = await fetchUsage(agent.backend, agent.id, this.scope);
+      if (this.currentAgent?.id === agent.id) this.renderAgentInfo();
+    } catch { /* non-critical */ }
+  }
+
   private async refreshAgents(): Promise<void> {
     try {
       this.agents = await fetchAgents(this.scope);
@@ -3307,7 +3405,7 @@ export class ChatPanel {
       // Refresh usage for current agent's backend
       if (this.currentAgent) {
         try {
-          this.usageReports[this.currentAgent.backend] = await fetchUsage(this.currentAgent.backend, this.scope);
+          this.usageReports[this.currentAgent.id] = await fetchUsage(this.currentAgent.backend, this.currentAgent.id, this.scope);
         } catch { /* non-critical */ }
       }
       this.renderAgentTabs();
@@ -3342,17 +3440,17 @@ export class ChatPanel {
           || this.agents[0];
         // Load throttle state for all agents in parallel
         await Promise.all(this.agents.map((a) => this.loadAgentThrottle(a)));
-        // Load usage for unique backends
-        const backends = [...new Set(this.agents.map((a) => a.backend))];
+        // Load usage per agent (each agent may sit on a different credential)
         await Promise.all(
-          backends.map(async (b) => {
+          this.agents.map(async (a) => {
             try {
-              this.usageReports[b] = await fetchUsage(b, this.scope);
+              this.usageReports[a.id] = await fetchUsage(a.backend, a.id, this.scope);
             } catch {
-              // Usage may not be available for all backends
+              // Usage may not be available for every agent
             }
           })
         );
+        this.startUsagePolling();
       }
 
       this.renderAgentTabs();

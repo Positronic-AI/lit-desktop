@@ -1,7 +1,9 @@
 // Settings overlay — Connections (credential pool) + Agents management.
 // Ports the web app's credential-pool + agents-lens surfaces to the desktop.
 
+import { ask } from "@tauri-apps/plugin-dialog";
 import {
+  restartAllSessions,
   listCredentials, createCredential, updateCredential, deleteCredential,
   setCredentialApiKey, fetchBackendStatus, backendForVendorMode,
   startOAuth, oauthStatus, submitOAuthCode, cancelOAuth,
@@ -278,7 +280,34 @@ function renderSetup(): void {
       " — the credentials, models, and agents below live on this server. Select a connection above to configure a different one."),
   );
 
-  bodyEl.append(serversSection, banner, connSection, modelsSection, agentSection);
+  // Sessions — one recovery action: end every live CLI session on this server
+  // (a wedged bridge, a CLI update to pick up). Collapsed like Models: it's a
+  // tool, not a setup step.
+  const sessionsSection = el("div", "setup-section");
+  const sessionsTitle = el("h3", "setup-section-title collapsible collapsed", "Sessions");
+  const sessionsChevron = el("span", "collapse-chevron", "▸");
+  sessionsTitle.insertBefore(sessionsChevron, sessionsTitle.firstChild);
+  sessionsSection.appendChild(sessionsTitle);
+  const sessionsRoot = el("div", "setup-section-body");
+  sessionsRoot.style.display = "none";
+  sessionsRoot.appendChild(
+    el("p", "settings-intro", "Ends every running session for your agents. Conversations resume on their next message."),
+  );
+  const restartRow = el("div", "sessions-restart-row");
+  const restartBtn = el("button", "settings-mini-btn", "Restart All Sessions") as HTMLButtonElement;
+  const restartStatus = el("span", "section-status", "");
+  restartRow.append(restartBtn, restartStatus);
+  sessionsRoot.appendChild(restartRow);
+  sessionsSection.appendChild(sessionsRoot);
+  sessionsTitle.addEventListener("click", () => {
+    const open = sessionsRoot.style.display !== "none";
+    sessionsRoot.style.display = open ? "none" : "";
+    sessionsChevron.textContent = open ? "▸" : "▾";
+    sessionsTitle.classList.toggle("collapsed", open);
+  });
+  restartBtn.addEventListener("click", () => void restartAllSessionsFromSetup(restartBtn, restartStatus));
+
+  bodyEl.append(serversSection, banner, connSection, modelsSection, agentSection, sessionsSection);
   renderConnections();
   renderModelsLens();
   renderAgents();
@@ -286,6 +315,28 @@ function renderSetup(): void {
 }
 
 
+
+/** "Restart All Sessions" — acts on the server the Setup screen is configuring. */
+async function restartAllSessionsFromSetup(btn: HTMLButtonElement, status: HTMLElement): Promise<void> {
+  const ok = await ask("Ends every running session for your agents. Conversations resume on their next message.",
+                       { title: "Restart All Sessions", kind: "warning", okLabel: "Restart all", cancelLabel: "Cancel" });
+  if (!ok) return;
+  btn.disabled = true;
+  status.className = "section-status";
+  status.textContent = " restarting…";
+  try {
+    const r = await restartAllSessions(setupScope());
+    const n = r.killed ?? 0;
+    status.className = "section-status ok";
+    status.textContent = ` Restarted ${n} session${n === 1 ? "" : "s"}`;
+  } catch (e) {
+    status.className = "section-status warn";
+    status.textContent = ` failed: ${e instanceof Error ? e.message : e}`;
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { if (status.className !== "section-status warn") status.textContent = ""; }, 6000);
+  }
+}
 
 async function renderModelsLens(): Promise<void> {
   if (!modelsRoot) return;

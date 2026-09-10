@@ -643,6 +643,48 @@ export async function postChannelMessage(
   }, scope);
 }
 
+// ---- Session restart (2026-09-10) ----
+// Both go through hostFetch directly (not apiFetch) so the server's `detail`
+// reaches the UI — a 409 while the agent is mid-reply carries the reason.
+
+export interface RestartSessionResult {
+  status: "restarted" | "no_session";
+  session: string;
+  killed: number;
+  detail?: string;
+  message_id?: string;
+}
+
+/** End this channel's live CLI session; the conversation resumes on the next message. */
+export async function restartChannelSession(channelId: string, scope: Scope = activeScope()): Promise<RestartSessionResult> {
+  const conn = scope.connection;
+  await ensureFreshToken(conn);
+  const res = await hostFetch(
+    `${conn.url}/mux/channels/${encodeURIComponent(channelId)}/restart-session?team=${encodeURIComponent(scope.team)}`,
+    { method: "POST", headers: authHeaders(conn) },
+  );
+  const body = await res.json().catch(() => ({} as any));
+  if (!res.ok) throw new Error(body?.detail || `API ${res.status}: ${res.statusText}`);
+  return body as RestartSessionResult;
+}
+
+export interface RestartAllResult {
+  status: string;
+  killed: number;
+  daemons_killed: number;
+  sessions: string[];
+}
+
+/** End every live CLI session the signed-in user has on this server. */
+export async function restartAllSessions(scope: Scope = activeScope()): Promise<RestartAllResult> {
+  const conn = scope.connection;
+  await ensureFreshToken(conn);
+  const res = await hostFetch(`${conn.url}/mux/sessions/restart-all`, { method: "POST", headers: authHeaders(conn) });
+  const body = await res.json().catch(() => ({} as any));
+  if (!res.ok) throw new Error(body?.detail || `API ${res.status}: ${res.statusText}`);
+  return body as RestartAllResult;
+}
+
 export async function openFolder(folderPath: string, name?: string, scope: Scope = activeScope()): Promise<{ id: string; name: string }> {
   const res = await hostFetch(`${scope.connection.url}/mux/channels/open-folder`, {
     method: "POST",
@@ -866,8 +908,13 @@ export async function getInterrupt(agentId: string, scope: Scope = activeScope()
   return apiFetch<{ interrupt_requested: boolean }>(`/agents/${agentId}/heartbeat/interrupt`, undefined, scope);
 }
 
-export async function fetchUsage(backendId: string, scope: Scope = activeScope()): Promise<UsageReport> {
-  return apiFetch<UsageReport>(`/backends/${backendId}/usage`, undefined, scope);
+/** Usage/quota for the credential an AGENT is bound to. The server resolves the
+ *  credential from the agent (per-agent, team-scoped); without agent_id it fell
+ *  back to whatever flat default existed, which is why the meter only showed up
+ *  some of the time (Ben, 2026-09-10). */
+export async function fetchUsage(backendId: string, agentId: string, scope: Scope = activeScope()): Promise<UsageReport> {
+  const q = `?team=${encodeURIComponent(scope.team)}&agent_id=${encodeURIComponent(agentId)}`;
+  return apiFetch<UsageReport>(`/backends/${backendId}/usage${q}`, undefined, scope);
 }
 
 export async function cancelStream(streamId: string, scope: Scope = activeScope()): Promise<void> {
@@ -1064,7 +1111,8 @@ export interface ModelsResponse {
 }
 
 export async function fetchModelsWithConstraints(scope: Scope = activeScope()): Promise<ModelsResponse> {
-  const data = await apiFetch<{ models: Record<string, { name: string; display_name?: string }[]>; constraints?: Record<string, string[]> }>("/models", undefined, scope);
+  // team → the server filters through the team's policy (org-policy.md); no policy = unfiltered.
+  const data = await apiFetch<{ models: Record<string, { name: string; display_name?: string }[]>; constraints?: Record<string, string[]> }>(`/models?team=${encodeURIComponent(scope.team)}`, undefined, scope);
   const models: Record<string, BackendModel[]> = {};
   for (const [backend, list] of Object.entries(data.models || {})) {
     models[backend] = list.map((m) => ({ name: m.name || String(m), display_name: m.display_name || m.name || String(m) }));
