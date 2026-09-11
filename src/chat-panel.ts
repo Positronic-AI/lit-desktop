@@ -2379,6 +2379,17 @@ export class ChatPanel {
    *  user types — an expired refresh token means every message will bounce with
    *  "Login expired", so surface it as a banner with a one-click path to the
    *  terminal /login flow instead. Best-effort: never blocks chat. */
+  /** An agent reply that IS the auth failure ("Error: OAuth token expired…" /
+   *  "Error: Couldn't refresh the Claude login…") should surface the re-auth
+   *  card right under it instead of reading like any other reply (Ben,
+   *  2026-09-11). The card only renders when the status endpoint confirms the
+   *  login is dead, so transient refresh failures stay text-only. */
+  private static readonly AUTH_ERROR_RE = /^\s*Error: (OAuth token expired|Couldn't refresh the Claude login)/;
+
+  private maybeAuthRecheck(content: string | undefined | null): void {
+    if (content && ChatPanel.AUTH_ERROR_RE.test(content)) void this.checkAgentAuth();
+  }
+
   private async checkAgentAuth(): Promise<void> {
     const agent = this.currentAgent;
     this.renderAuthBanner(null);
@@ -2764,6 +2775,7 @@ export class ChatPanel {
         } else if (data.id && data.content && data.direction) {
           if (!this.knownMessageIds.has(data.id)) {
             this.knownMessageIds.add(data.id);
+            if (data.direction !== "in") this.maybeAuthRecheck(data.content);
             if (data.metadata?.source !== "reaction" && !suppressAfterStream(data.direction)) {
               this.renderMessage({
                 role: data.direction === "in" ? "user" : "assistant",
@@ -2998,6 +3010,7 @@ export class ChatPanel {
     // mobile wizard) must not outlive the evidence. Re-check, don't just
     // clear: the stream may also have surfaced a NEW auth failure.
     if (this.authBannerEl) void this.checkAgentAuth();
+    else this.maybeAuthRecheck(this.streamingText);
     if (this.streamingEl && this.streamingText) {
       // Re-render with full parsing (tool calls become collapsible sections)
       const parsed = parseMessageContent(this.streamingText);
