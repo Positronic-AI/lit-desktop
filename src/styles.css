@@ -2288,19 +2288,23 @@ kbd {
 
 /* Cancel streaming button */
 .cancel-stream-btn {
-  width: 38px;
-  height: 38px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font-size: 14px;
-  cursor: pointer;
-  transition: all 0.15s;
-  flex-shrink: 0;
-  display: flex;
+  /* A labelled pill, not a bare glyph next to Send: Katie clicked it thinking
+     it was the terminal button (2026-09-11). */
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 32px;
+  border-radius: 16px;
+  border: 1px solid rgba(200, 98, 90, 0.6);
+  background: rgba(200, 98, 90, 0.12);
+  color: #e06c60;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  white-space: nowrap;
+  margin-right: 6px;
 }
 
 .cancel-stream-btn:hover {
