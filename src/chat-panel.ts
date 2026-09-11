@@ -317,14 +317,19 @@ function parseMessageContent(raw: string): ParsedContent {
   // twice — the mux-synthesized card plus the reflow's own frame once the
   // answered call enters the transcript. Keep the LAST occurrence (canonical
   // tool input).
-  const lastAskIdx = new Map<string, number>();
-  rawParts.forEach((p, idx) => {
-    if (p.type === "ask" && p.ask) lastAskIdx.set(p.ask.map((q) => q.question).join("\n"), idx);
-  });
-  for (let idx = rawParts.length - 1; idx >= 0; idx--) {
+  // Only ADJACENT identical cards are one question seen twice. Two distinct
+  // permission prompts in one turn both read "Do you want to proceed?"; a
+  // turn-wide dedupe kept only the last and the second went unanswered
+  // (2026-09-11). Anything but blank text between them means a new question.
+  const askKey = (p: { ask?: { question: string }[] }) => (p.ask || []).map((q) => q.question).join("\n");
+  for (let idx = rawParts.length - 1; idx >= 1; idx--) {
     const p = rawParts[idx];
     if (p.type !== "ask" || !p.ask) continue;
-    if (lastAskIdx.get(p.ask.map((q) => q.question).join("\n")) !== idx) rawParts.splice(idx, 1);
+    let j = idx - 1;
+    while (j >= 0 && rawParts[j].type === "text" && !String((rawParts[j] as any).content || "").trim()) j--;
+    if (j >= 0 && rawParts[j].type === "ask" && askKey(rawParts[j] as any) === askKey(p)) {
+      rawParts.splice(j, 1);
+    }
   }
 
   // Second pass: group consecutive tool parts into tool-groups
