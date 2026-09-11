@@ -104,6 +104,8 @@ interface AskOption {
 interface AskQuestion {
   header?: string;
   question: string;
+  /** Dialog body above the question (a permission prompt's command + guard reason). */
+  context?: string;
   options: AskOption[];
   multiSelect?: boolean;
 }
@@ -263,6 +265,7 @@ function parseMessageContent(raw: string): ParsedContent {
             const questions: AskQuestion[] = (Array.isArray(rawQ) ? rawQ : [rawQ]).map((q: any) => ({
               header: q.header,
               question: q.question,
+              context: q.context,
               options: (q.options || []).map((o: any) => ({
                 label: o.label,
                 description: o.description,
@@ -321,7 +324,8 @@ function parseMessageContent(raw: string): ParsedContent {
   // permission prompts in one turn both read "Do you want to proceed?"; a
   // turn-wide dedupe kept only the last and the second went unanswered
   // (2026-09-11). Anything but blank text between them means a new question.
-  const askKey = (p: { ask?: { question: string }[] }) => (p.ask || []).map((q) => q.question).join("\n");
+  const askKey = (p: { ask?: { question: string; context?: string }[] }) =>
+    (p.ask || []).map((q) => `${q.context || ""}\n${q.question}`).join("\n");
   for (let idx = rawParts.length - 1; idx >= 1; idx--) {
     const p = rawParts[idx];
     if (p.type !== "ask" || !p.ask) continue;
@@ -586,6 +590,8 @@ function renderContentParts(parent: HTMLElement, parts: ContentPart[], role: str
     } else if (part.type === "tool" && part.tool) {
       parent.appendChild(renderToolCallEl(part.tool));
     } else if (part.type === "thinking") {
+      // Narration line: Fable's per-step summary relayed by the bridge (the
+      // CLI's "· summarized" bullets), or another backend's reasoning.
       const el = document.createElement("div");
       el.className = "thinking-content";
       el.innerHTML = renderMarkdown(part.content || "");
@@ -617,6 +623,12 @@ function renderAskCardEl(questions: AskQuestion[]): HTMLDivElement {
       head.className = "ask-header";
       head.textContent = q.header;
       qEl.appendChild(head);
+    }
+    if (q.context) {
+      const ctx = document.createElement("pre");
+      ctx.className = "ask-question-context";
+      ctx.textContent = q.context;
+      qEl.appendChild(ctx);
     }
     const title = document.createElement("div");
     title.className = "ask-question-text";
