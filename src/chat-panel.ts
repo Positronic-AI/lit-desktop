@@ -1968,10 +1968,16 @@ export class ChatPanel {
     }
     this.agentInfoEl.appendChild(modelBtn);
 
-    // Usage bars (filter out Sonnet quota when a non-Sonnet model is selected)
+    // Usage bars. Session + Weekly are plan-wide; a model-scoped weekly limit
+    // ("Fable", "Opus", "Sonnet") shows only when the selected model is that model.
     if (usage?.available && usage.quotas.length > 0) {
-      const isSonnet = agent.model.toLowerCase().includes("sonnet");
-      const relevantQuotas = usage.quotas.filter((q) => isSonnet || q.name.toLowerCase() !== "sonnet");
+      const modelLc = String(effectiveModel || "").toLowerCase();
+      const claudeBackend = String(agent.backend || "claude-cli").startsWith("claude");
+      const relevantQuotas = usage.quotas.filter((q) => {
+        if (!claudeBackend) return true;
+        const n = q.name.toLowerCase();
+        return n === "session" || n === "weekly" || modelLc.includes(n);
+      });
       if (relevantQuotas.length > 0) {
         const tooltipLines = relevantQuotas.map((q) => `${q.name}: ${Math.round(q.used * 100)}%`).join("\n");
         const barsDiv = document.createElement("div");
