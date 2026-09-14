@@ -90,6 +90,43 @@ interface ToolCall {
   paramPreview: string;
   params: { key: string; value: string }[];
   result?: string;
+  /** The model's own one-line description of the call (Bash/Agent `description`) —
+   *  what the CLI prints as the row header. Absent for tools without one. */
+  title?: string;
+}
+
+/** Collapsed label for a finished tool group: the tool mix, the way the CLI
+ *  folds a run ("Ran 11 shell commands, wrote 2 files"). Same rules as the
+ *  webapp's tool-message component. */
+export function toolMixLabel(tools: ToolCall[]): string {
+  const counts = new Map<string, number>();
+  for (const t of tools) counts.set(t.name, (counts.get(t.name) || 0) + 1);
+  const clauses: { n: number; text: string }[] = [];
+  const take = (names: string[], one: string, many: string) => {
+    let n = 0;
+    for (const nm of names) { n += counts.get(nm) || 0; counts.delete(nm); }
+    if (n) clauses.push({ n, text: n === 1 ? one : many.replace("#", String(n)) });
+  };
+  take(["Bash"], "ran 1 shell command", "ran # shell commands");
+  take(["Write"], "wrote 1 file", "wrote # files");
+  take(["Edit", "MultiEdit", "NotebookEdit"], "edited 1 file", "edited # files");
+  take(["Read"], "read 1 file", "read # files");
+  take(["Grep", "Glob"], "ran 1 search", "ran # searches");
+  take(["WebFetch", "WebSearch"], "looked up 1 page", "looked up # pages");
+  take(["Agent", "Task"], "ran 1 agent", "ran # agents");
+  take(["ScheduleWakeup"], "scheduled a wakeup", "scheduled # wakeups");
+  let rest = 0;
+  for (const n of counts.values()) rest += n;
+  if (rest) clauses.push({ n: rest, text: rest === 1 ? "used 1 tool" : `used ${rest} tools` });
+  clauses.sort((a, b) => b.n - a.n);
+  const out = clauses.map((c) => c.text).join(", ");
+  return out ? out.charAt(0).toUpperCase() + out.slice(1) : "";
+}
+
+/** Header line for a call that is still running: its own description, else
+ *  name + argument — the line the CLI shows above the command. */
+export function toolTitle(tool: ToolCall): string {
+  return tool.title || `${tool.name}${tool.paramPreview}`;
 }
 
 interface ToolGroup {
@@ -282,11 +319,13 @@ function parseMessageContent(raw: string): ParsedContent {
               });
             }
 
+            const description = typeof toolInput.description === "string" ? toolInput.description.trim() : "";
             const tool: ToolCall = {
               name: toolName,
               iconSvg: getToolIcon(toolName),
               paramPreview: getParamPreview(toolName, toolInput),
               params,
+              title: description || undefined,
             };
             pendingToolCalls.push(tool);
             rawParts.push({ type: "tool", tool });
@@ -443,7 +482,7 @@ function renderToolGroupEl(group: ToolGroup): HTMLDivElement {
 
   const label = document.createElement("span");
   label.className = "tool-group-label";
-  label.textContent = `${group.tools.length} action${group.tools.length !== 1 ? "s" : ""}`;
+  label.textContent = toolMixLabel(group.tools);
   header.appendChild(label);
 
   if (hasPending) {
@@ -472,9 +511,9 @@ function renderToolGroupEl(group: ToolGroup): HTMLDivElement {
     body.style.display = isOpen ? "none" : "";
     toggle.classList.toggle("open", !isOpen);
     iconsSpan.style.display = isOpen ? "" : "none";
-    label.textContent = isOpen
-      ? `${group.tools.length} action${group.tools.length !== 1 ? "s" : ""}`
-      : "";
+    // Closing restores the mix label; while the group is still working the
+    // streaming path owns the label text and re-stamps it on the next tick.
+    label.textContent = isOpen && !label.dataset.startedAt ? toolMixLabel(group.tools) : (isOpen ? label.textContent : "");
   });
 
   return el;
@@ -925,6 +964,10 @@ export class ChatPanel {
 
   // Streaming render state
   private streamingEl: HTMLElement | null = null;
+  /** First-seen time per tool ordinal in the live message — the bubble is
+   *  re-rendered from scratch on every chunk, so the clocks live here. */
+  private streamToolStart = new Map<number, number>();
+  private streamTicker: ReturnType<typeof setInterval> | null = null;
   private streamingText = "";
   // Timestamp of the last stream_end that carried content — used to suppress the
   // duplicate persisted assistant message that arrives just after (webapp parity).
@@ -3008,26 +3051,59 @@ export class ChatPanel {
     const parsed = parseMessageContent(this.streamingText);
     renderContentParts(this.streamingEl!, parsed.parts, "assistant");
 
-    // If there are active tool groups, show "Working..." on the last one
-    const toolGroups = this.streamingEl!.querySelectorAll(".tool-group");
-    if (toolGroups.length > 0) {
-      const lastGroup = toolGroups[toolGroups.length - 1];
-      const label = lastGroup.querySelector(".tool-group-label");
-      if (label && hasToolDelimiters(this.streamingText)) {
-        const lastToolJson = this.streamingText.lastIndexOf("\x02TOOLJSON");
-        const lastToolEnd = this.streamingText.lastIndexOf("\x03");
-        const lastResultEnd = this.streamingText.lastIndexOf("[/TOOL_RESULT]");
-        if (lastToolJson > lastResultEnd && lastToolJson > lastToolEnd) {
-          label.textContent = "Working…";
-          (label as HTMLElement).style.fontStyle = "italic";
-        }
-      }
-    }
+    // A group with a call still awaiting its result is "working": its header
+    // shows that call's own description (or name + argument) with elapsed
+    // seconds — the line the CLI prints above the running command.
+    this.stampWorkingGroup(parsed.parts);
 
     if (!this.userIsScrolledUp) this.scrollToBottom();
   }
 
+  private stampWorkingGroup(parts: ContentPart[]): void {
+    if (!this.streamingEl) return;
+    const now = Date.now();
+    const groupEls = this.streamingEl.querySelectorAll(".tool-group");
+    let ordinal = 0;
+    let groupIdx = 0;
+    let stamped = false;
+    for (const part of parts) {
+      if (part.type === "tool" && part.tool) { ordinal++; continue; }
+      if (part.type !== "tool-group" || !part.toolGroup) continue;
+      const el = groupEls[groupIdx++];
+      let running: ToolCall | null = null;
+      let startedAt = now;
+      for (const t of part.toolGroup.tools) {
+        if (!this.streamToolStart.has(ordinal)) this.streamToolStart.set(ordinal, now);
+        if (!running && !t.result) { running = t; startedAt = this.streamToolStart.get(ordinal)!; }
+        ordinal++;
+      }
+      const label = el?.querySelector(".tool-group-label") as HTMLElement | null;
+      if (!label || !running) continue;
+      label.dataset.base = toolTitle(running);
+      label.dataset.startedAt = String(startedAt);
+      label.style.fontStyle = "italic";
+      this.tickWorkingLabel(label, now);
+      stamped = true;
+    }
+    if (stamped && !this.streamTicker) {
+      this.streamTicker = setInterval(() => {
+        if (!this.streamingEl) return;
+        const now2 = Date.now();
+        this.streamingEl.querySelectorAll<HTMLElement>(".tool-group-label[data-started-at]")
+          .forEach((l) => this.tickWorkingLabel(l, now2));
+      }, 1000);
+    }
+  }
+
+  private tickWorkingLabel(label: HTMLElement, now: number): void {
+    const started = Number(label.dataset.startedAt || now);
+    const secs = Math.max(0, Math.floor((now - started) / 1000));
+    label.textContent = `${label.dataset.base || "Working…"} · ${secs}s`;
+  }
+
   private finalizeStream(): void {
+    this.streamToolStart.clear();
+    if (this.streamTicker) { clearInterval(this.streamTicker); this.streamTicker = null; }
     // A completed stream is living proof the login works — a "login expired"
     // card rendered before a credential was repaired elsewhere (e.g. the
     // mobile wizard) must not outlive the evidence. Re-check, don't just
