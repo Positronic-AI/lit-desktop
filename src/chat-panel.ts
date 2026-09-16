@@ -2452,13 +2452,37 @@ export class ChatPanel {
    *  login is dead, so transient refresh failures stay text-only. */
   private static readonly AUTH_ERROR_RE = /^\s*Error: (OAuth token expired|Couldn't refresh the Claude login)/;
 
-  private maybeAuthRecheck(content: string | undefined | null): void {
-    if (content && ChatPanel.AUTH_ERROR_RE.test(content)) void this.checkAgentAuth();
+  /** Credential named by the server's structured `auth_required` on the last
+   *  auth-failure reply — the one the failing turn actually used, which wins
+   *  over the agent's configured credential when the two differ. */
+  private authRequiredCredentialId: string | null | undefined = undefined;
+  private pendingStreamAuthRequired: any = null;
+
+  private maybeAuthRecheck(content: string | undefined | null, meta?: any): void {
+    const req = meta?.auth_required;
+    if (req && typeof req === "object") {
+      this.showAuthRequired(req);
+      return;
+    }
+    if (content && ChatPanel.AUTH_ERROR_RE.test(content)) void this.checkAgentAuth(true);
   }
 
-  private async checkAgentAuth(): Promise<void> {
+  private showAuthRequired(req: { credentials_id?: string | null }): void {
+    const cid = req.credentials_id ?? null;
+    this.authRequiredCredentialId = cid;
+    const who = this.currentAgent?.name || "this agent";
+    this.renderAuthBanner({
+      kind: "error",
+      text: cid
+        ? `Claude login for credential "${cid}" expired — re-authenticate to reconnect ${who}.`
+        : `${who} has no Claude credential bound — sign in to bind one.`,
+    });
+  }
+
+  private async checkAgentAuth(fromErrorReply = false): Promise<void> {
     const agent = this.currentAgent;
     this.renderAuthBanner(null);
+    this.authRequiredCredentialId = undefined;
     if (!agent) return;
     const backend = (agent.backend || "").toLowerCase();
     if (backend !== "claude-interactive" && backend !== "claude-cli") return;
@@ -2470,6 +2494,13 @@ export class ChatPanel {
         this.renderAuthBanner({
           kind: "error",
           text: "Claude login expired — re-authenticate to reconnect this agent.",
+        });
+      } else if (fromErrorReply) {
+        // The reply said the login is dead; believe it even when the probe of
+        // this credential is green (the turn may have used another one).
+        this.renderAuthBanner({
+          kind: "error",
+          text: `${agent.name || agent.id} reported an expired Claude login — re-authenticate to reconnect it.`,
         });
       } else if (status.warning) {
         this.renderAuthBanner({ kind: "warn", text: status.warning });
@@ -2519,7 +2550,9 @@ export class ChatPanel {
       const agent = this.currentAgent;
       const full = agent ? await getAgent(agent.id, this.scope) : null;
       const creds = await listCredentials(this.scope.team, this.scope);
+      const wanted = this.authRequiredCredentialId !== undefined ? this.authRequiredCredentialId : full?.credentials_id;
       const cred: Credential | undefined =
+        creds.find((c) => c.id && c.id === wanted) ||
         creds.find((c) => c.id && c.id === full?.credentials_id) ||
         creds.find((c) => c.vendor === "anthropic" && c.is_default) ||
         creds.find((c) => c.vendor === "anthropic");
@@ -2841,7 +2874,7 @@ export class ChatPanel {
         } else if (data.id && data.content && data.direction) {
           if (!this.knownMessageIds.has(data.id)) {
             this.knownMessageIds.add(data.id);
-            if (data.direction !== "in") this.maybeAuthRecheck(data.content);
+            if (data.direction !== "in") this.maybeAuthRecheck(data.content, data.metadata);
             if (data.metadata?.source !== "reaction" && !suppressAfterStream(data.direction)) {
               this.renderMessage({
                 role: data.direction === "in" ? "user" : "assistant",
@@ -2882,6 +2915,7 @@ export class ChatPanel {
         } else if (data.type === "action" && data.action) {
           this.handleChatAction(data);
         } else if (data.type === "stream_end") {
+          this.pendingStreamAuthRequired = data.auth_required || null;
           this.streamingChannels.delete(channelId);
           clearBusy(`stream:${channelId}`);
           this.activeStreamId = null;
@@ -3109,7 +3143,8 @@ export class ChatPanel {
     // mobile wizard) must not outlive the evidence. Re-check, don't just
     // clear: the stream may also have surfaced a NEW auth failure.
     if (this.authBannerEl) void this.checkAgentAuth();
-    else this.maybeAuthRecheck(this.streamingText);
+    else this.maybeAuthRecheck(this.streamingText, this.pendingStreamAuthRequired ? { auth_required: this.pendingStreamAuthRequired } : undefined);
+    this.pendingStreamAuthRequired = null;
     if (this.streamingEl && this.streamingText) {
       // Re-render with full parsing (tool calls become collapsible sections)
       const parsed = parseMessageContent(this.streamingText);
