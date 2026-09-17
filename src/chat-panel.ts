@@ -469,12 +469,23 @@ function renderToolGroupEl(group: ToolGroup): HTMLDivElement {
 
   const iconsSpan = document.createElement("span");
   iconsSpan.className = "tool-group-icons";
-  for (const tool of group.tools) {
+  // Texture, not information: a long run shows the first few icons and a "+N"
+  // chip so the label keeps the row (seventy icons once squeezed it to a
+  // five-character column — games, 2026-09-17).
+  const ICON_CAP = 12;
+  for (const tool of group.tools.slice(0, ICON_CAP)) {
     const icon = document.createElement("span");
     icon.className = "tool-group-icon";
     icon.innerHTML = tool.iconSvg;
     icon.title = tool.name;
     iconsSpan.appendChild(icon);
+  }
+  if (group.tools.length > ICON_CAP) {
+    const more = document.createElement("span");
+    more.className = "tool-group-more";
+    more.textContent = `+${group.tools.length - ICON_CAP}`;
+    more.title = `${group.tools.length - ICON_CAP} more`;
+    iconsSpan.appendChild(more);
   }
   header.appendChild(iconsSpan);
 
