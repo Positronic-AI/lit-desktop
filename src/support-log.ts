@@ -10,6 +10,7 @@
 
 import { brand } from "./brand";
 import { getConnections, hostFetch } from "./api";
+import { readDesktopLog } from "./desktop-log";
 
 const NAME_KEY = "lit-support-name";
 
@@ -42,9 +43,9 @@ export function openSupportLogDialog(): void {
   card.innerHTML = `
     <div style="font-size:17px;font-weight:600;margin-bottom:10px;">🛟 Send Logs to Support</div>
     <div style="color:#b8bec9;margin-bottom:14px;">
-      This sends the app's technical log to the ${brand.displayName} support team
+      This sends the app's technical logs to the ${brand.displayName} support team
       so they can help you without a call. The log contains startup and error
-      details and may include file paths and recent app activity. Nothing is
+      details (backend and app shell) and may include file paths and recent app activity. Nothing is
       sent until you press <b>Send</b>.
     </div>
     <label style="display:block;margin-bottom:4px;color:#b8bec9;">Your name (so support knows who this is from)</label>
@@ -83,7 +84,10 @@ export function openSupportLogDialog(): void {
       const res = await fetch(`${local.url}/mux/support/local-log`);
       if (!res.ok) throw new Error(`local log fetch failed (${res.status})`);
       const { content } = await res.json();
-      if (!content) { status.textContent = "No log found on this machine — nothing to send."; sendBtn.disabled = false; return; }
+      // The shell's own log rides along: webview crashes, backend spawn/exit,
+      // dead app frames — none of which the backend can see.
+      const desktopLog = await readDesktopLog();
+      if (!content && !desktopLog) { status.textContent = "No log found on this machine — nothing to send."; sendBtn.disabled = false; return; }
 
       status.textContent = "Sending…";
       const version = await import("@tauri-apps/api/app")
@@ -100,6 +104,7 @@ export function openSupportLogDialog(): void {
         },
         body: JSON.stringify({
           content,
+          desktop_log: desktopLog,
           client_name: name,
           app_version: version,
           client_os: navigator.userAgent.slice(0, 120),

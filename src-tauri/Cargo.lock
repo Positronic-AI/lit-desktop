@@ -2075,6 +2075,8 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-shell",
  "tauri-plugin-websocket",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]

@@ -32,6 +32,8 @@ import { openSettings, registerSettingsOpener, mountSettingsPanel, disposeSettin
 import { openTerminal, closeTerminal, isTerminalOpen, fitToGrid } from "./terminal";
 import { brand } from "./brand";
 import { openSupportLogDialog, supportLogAvailable } from "./support-log";
+import { desktopLog } from "./desktop-log";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { WindowManager } from "./window-manager";
 import { registerPanel } from "./panel-host";
 import { mountGraphView } from "./graph-view";
@@ -274,8 +276,11 @@ registerPanel("viewer", () => ({
 // grid widget. Only 'iframe' apps render; other types aren't wired up yet.
 registerPanel("app", () => {
   let onMessage: ((ev: MessageEvent) => void) | null = null;
+  let onVisibility: (() => void) | null = null;
   let themeObserver: MutationObserver | null = null;
   let tokenTimer: ReturnType<typeof setInterval> | null = null;
+  let aliveTimer: ReturnType<typeof setInterval> | null = null;
+  let unlistenFailed: UnlistenFn | null = null;
   return {
     mount(host: HTMLElement, params: Record<string, any>) {
       const url = String(params.url || "");
@@ -283,51 +288,131 @@ registerPanel("app", () => {
         host.textContent = "This app has no URL to open.";
         return;
       }
-      const iframe = document.createElement("iframe");
-      iframe.className = "app-panel-iframe";
-      iframe.src = url.startsWith("http") ? url : `${activeChat().scope.connection.url}${url}`;
-      host.appendChild(iframe);
+      const src = url.startsWith("http") ? url : `${activeChat().scope.connection.url}${url}`;
+      const label = String(params.title || params.name || url);
+      host.style.position = "relative";
+      let iframe: HTMLIFrameElement | null = null;
 
+      // --- Dead-frame detection -------------------------------------------
+      // The app runs in a cross-origin iframe, which WebView2 (and Chromium
+      // generally) hosts in its OWN renderer process. When that process dies
+      // the frame paints a grey sad face and nothing in it ever runs again —
+      // the user's only recovery used to be relaunching the whole app (Katie,
+      // 2026-09-23). Two signals mark a frame dead: the app-host page's
+      // keepalive stopping (wheels ≥ 2.6.25; older hosts never send one, so
+      // silence alone is never judged), and the Rust `webview-process-failed`
+      // event naming this frame's URL (Windows). Either → overlay + Reload,
+      // which rebuilds the iframe in place.
+      const ALIVE_EVERY_MS = 3000; // what the shim sends
+      const DEAD_AFTER_MS = 12000;
+      let heardAlive = false;
+      let lastAlive = 0;
+      let overlay: HTMLElement | null = null;
+
+      const clearOverlay = () => { overlay?.remove(); overlay = null; };
+      const showDead = (why: string) => {
+        if (overlay) return;
+        desktopLog(`[app-panel] "${label}" frame is dead (${why}) — offering reload`);
+        overlay = document.createElement("div");
+        overlay.className = "app-panel-dead";
+        overlay.style.cssText =
+          "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;" +
+          "background:rgba(20,22,27,.92);color:#e6e6e6;z-index:5;font-size:14px;line-height:1.5;";
+        overlay.innerHTML = `
+          <div style="max-width:420px;padding:22px 24px;border:1px solid #3a3f4b;border-radius:12px;background:#1e2127;text-align:center;">
+            <div style="font-size:17px;font-weight:600;margin-bottom:8px;">This app stopped responding</div>
+            <div style="color:#b8bec9;margin-bottom:16px;">
+              The <b>${escapeHtml(label)}</b> view crashed. Your data is safe — reload the view to keep working.
+            </div>
+            <button class="app-panel-reload" style="background:#4c6ef5;color:#fff;border:none;border-radius:8px;padding:8px 18px;cursor:pointer;font-weight:600;">Reload</button>
+          </div>`;
+        overlay.querySelector(".app-panel-reload")!.addEventListener("click", () => {
+          desktopLog(`[app-panel] "${label}" reload clicked`);
+          buildFrame();
+        });
+        host.appendChild(overlay);
+      };
+
+      const conn = getConnections().find((c) => c.id === params.connectionId);
       // Hosted apps follow the app theme, and their window.open (swallowed by
       // webviews) is forwarded as a lit-open-url message → system browser.
       // Connector apps rely on this for their OAuth flows.
       const postTheme = () => {
         const theme = document.documentElement.getAttribute("data-theme") || "dark";
-        iframe.contentWindow?.postMessage({ type: "lit-theme", theme }, "*");
+        iframe?.contentWindow?.postMessage({ type: "lit-theme", theme }, "*");
       };
       // Remote app-host pages authenticate their commander calls with our
       // Bearer token, delivered by postMessage (an iframe navigation can't
       // carry headers). Origin-pinned so a page that navigated away can never
       // receive it; re-posted on an interval because access tokens are
       // short-lived (~5 min). Local connections have no token — nothing sent.
-      const conn = getConnections().find((c) => c.id === params.connectionId);
       const postToken = async () => {
         if (!conn?.token) return;
         try { await ensureFreshToken(conn); } catch { /* post the token we have */ }
         try {
-          iframe.contentWindow?.postMessage(
+          iframe?.contentWindow?.postMessage(
             { type: "lit-token", token: conn.token },
             new URL(conn.url).origin,
           );
         } catch { /* iframe gone or URL unparsable — interval retries */ }
       };
-      iframe.addEventListener("load", () => { postTheme(); void postToken(); });
+
+      const buildFrame = () => {
+        clearOverlay();
+        iframe?.remove();
+        heardAlive = false;
+        lastAlive = Date.now();
+        iframe = document.createElement("iframe");
+        iframe.className = "app-panel-iframe";
+        iframe.src = src;
+        iframe.addEventListener("load", () => { postTheme(); void postToken(); });
+        host.appendChild(iframe);
+      };
+      buildFrame();
+      desktopLog(`[app-panel] opened "${label}" → ${src}`);
+
       if (conn?.token) tokenTimer = setInterval(() => void postToken(), 4 * 60 * 1000);
       themeObserver = new MutationObserver(postTheme);
       themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
       onMessage = (ev: MessageEvent) => {
-        if (ev.source === iframe.contentWindow && ev.data?.type === "lit-open-url") {
+        if (!iframe || ev.source !== iframe.contentWindow) return;
+        if (ev.data?.type === "lit-app-alive") {
+          heardAlive = true;
+          lastAlive = Date.now();
+        } else if (ev.data?.type === "lit-open-url") {
           import("@tauri-apps/plugin-opener")
             .then((m) => m.openUrl(ev.data.url))
             .catch(() => window.open(ev.data.url, "_blank"));
         }
       };
       window.addEventListener("message", onMessage);
+      // Hidden windows get their timers throttled (Chromium: 1/min after 5 min
+      // in the background), so a keepalive gap while hidden proves nothing —
+      // judge only while visible, and restart the clock on coming back.
+      onVisibility = () => { if (!document.hidden) lastAlive = Date.now(); };
+      document.addEventListener("visibilitychange", onVisibility);
+      aliveTimer = setInterval(() => {
+        if (document.hidden || !heardAlive || overlay) return;
+        const gap = Date.now() - lastAlive;
+        if (gap > DEAD_AFTER_MS) showDead(`no keepalive for ${Math.round(gap / 1000)}s`);
+      }, ALIVE_EVERY_MS + 1000);
+      const frameBase = src.split("?")[0];
+      listen<{ kind: string; reason: string; exit_code: number; frames: string[] }>(
+        "webview-process-failed",
+        (ev) => {
+          const p = ev.payload;
+          const mine = (p.frames || []).some((f) => typeof f === "string" && f.split("?")[0] === frameBase);
+          if (mine) showDead(`${p.kind}: ${p.reason}, exit code ${p.exit_code}`);
+        },
+      ).then((un) => { unlistenFailed = un; }).catch(() => { /* not under Tauri */ });
     },
     dispose() {
       if (onMessage) window.removeEventListener("message", onMessage);
+      if (onVisibility) document.removeEventListener("visibilitychange", onVisibility);
       themeObserver?.disconnect();
       if (tokenTimer) clearInterval(tokenTimer);
+      if (aliveTimer) clearInterval(aliveTimer);
+      unlistenFailed?.();
     },
   };
 });
@@ -963,7 +1048,7 @@ async function startBackend(): Promise<boolean> {
   try {
     const cmd = ShellCommand.sidecar(`binaries/${brand.sidecarName}`, [], tempEnv ? { env: tempEnv } : undefined);
     cmd.on("close", (data) => {
-      console.log(`[backend] exited with code ${data.code}`);
+      desktopLog(`[backend] exited with code ${data.code}`);
       backendProcess = null;
     });
     cmd.stdout.on("data", (line) => console.log(`[backend] ${line}`));
@@ -978,12 +1063,12 @@ async function startBackend(): Promise<boolean> {
     } catch (e) {
       console.error("[backend] could not register pid for shutdown:", e);
     }
-    console.log("[backend] spawned, waiting for health check...");
+    desktopLog(`[backend] spawned pid ${backendProcess.pid}, waiting for health check...`);
   } catch (e) {
     // A spawn rejection (e.g. a shell-scope/capability denial) never writes to
     // the backend log — the backend never ran — so capture it for the UI.
     backendStartError = `Could not launch the backend process: ${String((e as any)?.message ?? e)}`;
-    console.error("[backend] failed to spawn sidecar:", e);
+    desktopLog(`[backend] failed to spawn sidecar: ${String((e as any)?.message ?? e)}`);
     return false;
   }
 
@@ -997,7 +1082,7 @@ async function startBackend(): Promise<boolean> {
     }
   }
   backendStartError = "The backend started but did not become reachable within 90 seconds.";
-  console.error("[backend] timed out waiting for server");
+  desktopLog("[backend] timed out waiting for server (90s)");
   return false;
 }
 
