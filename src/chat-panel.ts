@@ -227,6 +227,7 @@ function parseMessageContent(raw: string): ParsedContent {
     .replace(/<context>[\s\S]*?<\/context>\s*/g, "")
     .replace(/^SLEEP_MODE.*$/gm, "")
     .replace(/^REACT:.*$/gm, "")
+    .replace(/^ACK:.*$/gm, "")
     .replace(/^LINKS:.*$/gm, "")
     .trim();
 
