@@ -1,6 +1,8 @@
 import {
   checkConnection,
   checkConnectionNative,
+  setForceNativeLocal,
+  isForceNativeLocal,
   backendVersion,
   fetchCalendarDates,
   fetchCalendarDay,
@@ -1003,7 +1005,7 @@ async function startBackend(): Promise<boolean> {
     connection: getConnections().find((c) => c.id === "local")!,
     team: getActiveTeam(),
   };
-  if (await checkConnection(localScope)) {
+  if (await backendReachable(localScope)) {
     // Adopt-case handshake (Lais 2026-08-17): a healthy answer here can be a
     // WEEKS-old sidecar from a previous install — reinstalling the app never
     // fixed anything because we adopted the stale process. Compare the
@@ -1027,7 +1029,7 @@ async function startBackend(): Promise<boolean> {
     if (!reaped) return true;
     // Wait for the port to actually free before spawning our own.
     for (let i = 0; i < 10; i++) {
-      if (!(await checkConnection(localScope))) break;
+      if (!(await checkConnectionNative(localScope))) break;
       await new Promise((r) => setTimeout(r, 500));
     }
   }
@@ -1084,48 +1086,33 @@ async function startBackend(): Promise<boolean> {
       desktopLog("[backend] sidecar exited before becoming reachable");
       return false;
     }
-    const ready = await probeLocalBackend(localScope);
-    if (ready === "ok") {
+    if (await backendReachable(localScope)) {
       console.log("[backend] ready");
       return true;
     }
-    if (ready === "native-only") return await recoverPoisonedWebview();
   }
   backendStartError = "The backend started but did not become reachable within 90 seconds.";
   desktopLog("[backend] timed out waiting for server (90s)");
   return false;
 }
 
-/** "ok" = the webview's own fetch reaches the backend; "native-only" = only the
- *  Rust client does (the webview's fetch is stuck on an earlier refusal — see
- *  checkConnectionNative); "down" = neither. */
-async function probeLocalBackend(localScope: { connection: any; team: any }): Promise<"ok" | "native-only" | "down"> {
-  if (await checkConnection(localScope)) return "ok";
-  if (await checkConnectionNative(localScope)) return "native-only";
-  return "down";
-}
-
-const WEBVIEW_RELOAD_KEY = "lit-backend-webview-reload";
-
-/** The backend is up but this page's fetch can't see it. A fresh page against
- *  an already-running backend works (Lais's launch #4, 2026-09-30), so reload
- *  once; the second boot adopts the backend through the normal path. A second
- *  failure in the same session is reported, not retried, so this can't loop. */
-async function recoverPoisonedWebview(): Promise<boolean> {
-  let already = false;
-  try { already = sessionStorage.getItem(WEBVIEW_RELOAD_KEY) === "1"; } catch { /* no storage */ }
-  if (!already) {
-    try { sessionStorage.setItem(WEBVIEW_RELOAD_KEY, "1"); } catch { /* no storage */ }
-    desktopLog("[backend] reachable through the native client only — reloading the webview once");
-    window.location.reload();
-    // The reload tears this page down; keep the boot screen up meanwhile.
-    await new Promise(() => {});
-    return false;
+/** Is the local backend up? The NATIVE client asks first, so the webview never
+ *  touches the port while it is still refusing connections — on Lais's Mac
+ *  (2026-09-30) WebKit's fetch stayed stuck for the whole page session after
+ *  early refusals, and a page reload did not clear it. Once the native client
+ *  has seen the backend, the webview gets one try; if that fails, this
+ *  session's local traffic is routed through the native client instead.
+ *  The webview probe stays as a fallback for a build where the native client
+ *  cannot reach 127.0.0.1 (the 2.2.1 scope problem), so nothing regresses. */
+async function backendReachable(localScope: { connection: any; team: any }): Promise<boolean> {
+  if (isForceNativeLocal()) return await checkConnectionNative(localScope);
+  if (await checkConnectionNative(localScope)) {
+    if (await checkConnection(localScope)) return true;
+    setForceNativeLocal(true);
+    desktopLog("[backend] up for the native client but not for the webview's fetch — routing local traffic natively for this session");
+    return true;
   }
-  backendStartError =
-    "The backend is running, but this window cannot reach it. Quit the app and open it again.";
-  desktopLog("[backend] still native-only after a webview reload — asking for a relaunch");
-  return false;
+  return await checkConnection(localScope);
 }
 
 // --- Places catalog ---
@@ -1314,21 +1301,13 @@ async function init() {
     };
     const retry = setInterval(async () => {
       setStatus("connecting");
-      const ready = await probeLocalBackend(retryScope);
-      if (ready === "ok") {
+      if (await backendReachable(retryScope)) {
         clearInterval(retry);
         desktopLog("[backend] became reachable after the startup dialog — opening the app");
         setStatus("connected");
         bootComplete = true;
         activeChat().clearMessages();
         await loadInitialData();
-      } else if (ready === "native-only") {
-        clearInterval(retry);
-        await recoverPoisonedWebview();
-        setStatus("disconnected");
-        if (backendStartError) {
-          activeChat().renderMessage({ role: "system", content: "**" + backendStartError + "**" });
-        }
       } else {
         setStatus("disconnected");
       }

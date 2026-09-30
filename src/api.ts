@@ -82,12 +82,26 @@ const nativeFetchP: Promise<typeof globalThis.fetch> =
         .catch(() => globalThis.fetch.bind(globalThis))
     : Promise.resolve(globalThis.fetch.bind(globalThis));
 
+// Set when the webview's own fetch cannot reach a backend the native client
+// can (Lais's Mac, 2026-09-30: WebKit kept refusing 127.0.0.1:5000 for the
+// whole page session once it had been refused while the backend was starting;
+// a page reload did not clear it, only a new app process did). With it on,
+// local HTTP and WebSockets take the same native route remote servers use.
+let forceNativeLocal = false;
+export function setForceNativeLocal(on: boolean): void { forceNativeLocal = on; }
+export function isForceNativeLocal(): boolean { return forceNativeLocal; }
+
+function useNativeSocket(full: string): boolean {
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return false;
+  return !full.startsWith("ws://127.0.0.1") || forceNativeLocal;
+}
+
 export async function hostFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  // Local backend stays on the webview's fetch (proven path, and the plugin's
-  // URL scope won't match explicit ports like 127.0.0.1:5000). Mirrors the
-  // WebSocket shim, which is also remote-only.
+  // Local backend stays on the webview's fetch (proven path; the plugin's URL
+  // scope used to reject explicit ports like 127.0.0.1:5000) unless the
+  // startup probe found that fetch stuck — see setForceNativeLocal.
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-  if (url.startsWith("http://127.0.0.1")) return globalThis.fetch(input, init);
+  if (url.startsWith("http://127.0.0.1") && !forceNativeLocal) return globalThis.fetch(input, init);
   return (await nativeFetchP)(input, init);
 }
 
@@ -810,7 +824,7 @@ export function createTelemetryWebSocket(scope: Scope = activeScope()): WebSocke
   const params = new URLSearchParams();
   if (conn.token) params.set("token", conn.token);
   const full = `${wsUrl}/mux/ws/telemetry?${params.toString()}`;
-  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !full.startsWith("ws://127.0.0.1")) {
+  if (useNativeSocket(full)) {
     return new NativeWebSocketShim(full) as unknown as WebSocket;
   }
   return new WebSocket(full);
@@ -847,7 +861,7 @@ export function createChannelWebSocket(channelId: string, scope: Scope = activeS
   if (conn.token) params.set("token", conn.token);
   params.set("team", scope.team);
   const full = `${wsUrl}/mux/ws/channel/${channelId}?${params.toString()}`;
-  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !full.startsWith("ws://127.0.0.1")) {
+  if (useNativeSocket(full)) {
     return new NativeWebSocketShim(full) as unknown as WebSocket;
   }
   return new WebSocket(full);
@@ -860,7 +874,7 @@ export function createRemoteAttachWebSocket(conn: Connection): WebSocket {
   const params = new URLSearchParams();
   if (conn.token) params.set("token", conn.token);
   const full = `${wsUrl}/mux/ws/remote/attach?${params.toString()}`;
-  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !full.startsWith("ws://127.0.0.1")) {
+  if (useNativeSocket(full)) {
     return new NativeWebSocketShim(full) as unknown as WebSocket;
   }
   return new WebSocket(full);
