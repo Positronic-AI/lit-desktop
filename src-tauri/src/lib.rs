@@ -42,13 +42,32 @@ fn prepare_backend_runtime() -> Result<String, String> {
         .join("lit-desktop")
         .join("runtime");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
+    // Sweep orphaned extractions — but never one that may belong to a sidecar
+    // still running. 2.5.13 on Lais's Mac (2026-09-30 22:07Z): a second spawn
+    // against a live backend swept that backend's _MEI dir out from under it,
+    // and every lazy import in it failed from then on (500s on app-host,
+    // widgets, credentials; "Reconnecting…"). A dir touched in the last ten
+    // minutes is left alone; a real orphan is picked up on a later launch.
+    let fresh = std::time::Duration::from_secs(10 * 60);
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("_MEI") {
-                match std::fs::remove_dir_all(entry.path()) {
-                    Ok(()) => println!("[runtime] swept stale {:?}", entry.file_name()),
-                    Err(e) => println!("[runtime] skip {:?}: {e}", entry.file_name()),
-                }
+            if !entry.file_name().to_string_lossy().starts_with("_MEI") {
+                continue;
+            }
+            let recently_used = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|age| age < fresh)
+                .unwrap_or(true);
+            if recently_used {
+                desktop_log_write(&format!("[runtime] keeping {:?} (touched in the last 10 min; may be live)", entry.file_name()));
+                continue;
+            }
+            match std::fs::remove_dir_all(entry.path()) {
+                Ok(()) => println!("[runtime] swept stale {:?}", entry.file_name()),
+                Err(e) => println!("[runtime] skip {:?}: {e}", entry.file_name()),
             }
         }
     }
