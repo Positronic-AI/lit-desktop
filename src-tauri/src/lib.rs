@@ -338,6 +338,21 @@ fn read_desktop_log() -> String {
     String::from_utf8_lossy(tail).into_owned()
 }
 
+const BACKEND_LOG_TAIL: usize = 5 * 1024 * 1024;
+
+/// Tail of backend.log (same 5 MiB the backend's own /support/local-log
+/// returns), read by the shell so "Send Logs" works when the backend is the
+/// thing that failed — the one time it matters (Lais, 2026-09-30).
+#[tauri::command]
+fn read_backend_log() -> String {
+    let Some(path) = desktop_log_path().map(|p| p.with_file_name("backend.log")) else {
+        return String::new();
+    };
+    let Ok(data) = std::fs::read(&path) else { return String::new() };
+    let tail = &data[data.len().saturating_sub(BACKEND_LOG_TAIL)..];
+    String::from_utf8_lossy(tail).into_owned()
+}
+
 /// Subscribe to WebView2's ProcessFailed event: every renderer / frame / GPU /
 /// utility process death gets a desktop.log line (kind, reason, exit code,
 /// process, the frames it was hosting) and a `webview-process-failed` event
@@ -490,7 +505,8 @@ pub fn run() {
             prepare_backend_runtime,
             reap_backend_on_port,
             desktop_log,
-            read_desktop_log
+            read_desktop_log,
+            read_backend_log
         ])
         .setup(|app| {
             desktop_log_write(&format!(

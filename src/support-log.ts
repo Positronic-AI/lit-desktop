@@ -2,15 +2,16 @@
 // backend log to the brand's support dropbox, so support never has to walk a
 // client through Explorer on a call (Lais/Katie request, 2026-08-12).
 //
-// Flow: fetch the sidecar's own log from the LOCAL backend
-// (GET /support/local-log — the backend serves its own file, so no Tauri
-// fs-scope grant is needed) → POST multipart to brand.supportLogUrl with the
-// brand's write-only drop token. Consent is the dialog itself: it names
-// exactly what's being sent before anything leaves the machine.
+// Flow: the shell reads backend.log itself (Rust command; it used to ask the
+// LOCAL backend for its own log, which is exactly the thing that is down when
+// a user reaches for this button — Lais, 2026-09-30) → POST JSON to
+// brand.supportLogUrl with the brand's write-only drop token. Consent is the
+// dialog itself: it names exactly what's being sent before anything leaves the
+// machine.
 
 import { brand } from "./brand";
 import { getConnections, hostFetch } from "./api";
-import { readDesktopLog } from "./desktop-log";
+import { readBackendLog, readDesktopLog } from "./desktop-log";
 
 const NAME_KEY = "lit-support-name";
 
@@ -79,11 +80,18 @@ export function openSupportLogDialog(): void {
     sendBtn.disabled = true;
     status.textContent = "Collecting log…";
     try {
-      const local = getConnections().find((c) => c.id === "local");
-      if (!local) throw new Error("no local backend connection");
-      const res = await fetch(`${local.url}/mux/support/local-log`);
-      if (!res.ok) throw new Error(`local log fetch failed (${res.status})`);
-      const { content } = await res.json();
+      let content = await readBackendLog();
+      if (!content) {
+        // Shell read failed or found nothing: fall back to the backend's own
+        // copy, which needs the backend up.
+        const local = getConnections().find((c) => c.id === "local");
+        if (local) {
+          try {
+            const res = await fetch(`${local.url}/mux/support/local-log`);
+            if (res.ok) content = (await res.json()).content || "";
+          } catch { /* backend down — desktop.log alone still goes */ }
+        }
+      }
       // The shell's own log rides along: webview crashes, backend spawn/exit,
       // dead app frames — none of which the backend can see.
       const desktopLog = await readDesktopLog();

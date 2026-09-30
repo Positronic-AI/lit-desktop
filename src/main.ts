@@ -1,5 +1,6 @@
 import {
   checkConnection,
+  checkConnectionNative,
   backendVersion,
   fetchCalendarDates,
   fetchCalendarDay,
@@ -1076,13 +1077,54 @@ async function startBackend(): Promise<boolean> {
   // Defender scans every file, which can exceed 30s on the very first launch.
   for (let i = 0; i < 90; i++) {
     await new Promise((r) => setTimeout(r, 1000));
-    if (await checkConnection(localScope)) {
+    if (backendProcess === null) {
+      // cmd.on("close") cleared it: the sidecar died. Say so instead of
+      // waiting out the clock against a port nobody will ever open.
+      backendStartError = "The backend process exited during startup (see the log below).";
+      desktopLog("[backend] sidecar exited before becoming reachable");
+      return false;
+    }
+    const ready = await probeLocalBackend(localScope);
+    if (ready === "ok") {
       console.log("[backend] ready");
       return true;
     }
+    if (ready === "native-only") return await recoverPoisonedWebview();
   }
   backendStartError = "The backend started but did not become reachable within 90 seconds.";
   desktopLog("[backend] timed out waiting for server (90s)");
+  return false;
+}
+
+/** "ok" = the webview's own fetch reaches the backend; "native-only" = only the
+ *  Rust client does (the webview's fetch is stuck on an earlier refusal — see
+ *  checkConnectionNative); "down" = neither. */
+async function probeLocalBackend(localScope: { connection: any; team: any }): Promise<"ok" | "native-only" | "down"> {
+  if (await checkConnection(localScope)) return "ok";
+  if (await checkConnectionNative(localScope)) return "native-only";
+  return "down";
+}
+
+const WEBVIEW_RELOAD_KEY = "lit-backend-webview-reload";
+
+/** The backend is up but this page's fetch can't see it. A fresh page against
+ *  an already-running backend works (Lais's launch #4, 2026-09-30), so reload
+ *  once; the second boot adopts the backend through the normal path. A second
+ *  failure in the same session is reported, not retried, so this can't loop. */
+async function recoverPoisonedWebview(): Promise<boolean> {
+  let already = false;
+  try { already = sessionStorage.getItem(WEBVIEW_RELOAD_KEY) === "1"; } catch { /* no storage */ }
+  if (!already) {
+    try { sessionStorage.setItem(WEBVIEW_RELOAD_KEY, "1"); } catch { /* no storage */ }
+    desktopLog("[backend] reachable through the native client only — reloading the webview once");
+    window.location.reload();
+    // The reload tears this page down; keep the boot screen up meanwhile.
+    await new Promise(() => {});
+    return false;
+  }
+  backendStartError =
+    "The backend is running, but this window cannot reach it. Quit the app and open it again.";
+  desktopLog("[backend] still native-only after a webview reload — asking for a relaunch");
   return false;
 }
 
@@ -1262,14 +1304,31 @@ async function init() {
         "The full startup log (including any error) was written to:\n\n" +
         "`" + logPath + "`",
     });
+    // Keep looking for the LOCAL backend (not the active scope, which may be a
+    // remote place) with the same two-client probe as startup: a slow sidecar
+    // that comes up after the dialog opens the app on its own, and a backend
+    // only the native client can see gets the one-time webview reload.
+    const retryScope = {
+      connection: getConnections().find((c) => c.id === "local")!,
+      team: getActiveTeam(),
+    };
     const retry = setInterval(async () => {
       setStatus("connecting");
-      if (await checkConnection()) {
+      const ready = await probeLocalBackend(retryScope);
+      if (ready === "ok") {
         clearInterval(retry);
+        desktopLog("[backend] became reachable after the startup dialog — opening the app");
         setStatus("connected");
         bootComplete = true;
         activeChat().clearMessages();
         await loadInitialData();
+      } else if (ready === "native-only") {
+        clearInterval(retry);
+        await recoverPoisonedWebview();
+        setStatus("disconnected");
+        if (backendStartError) {
+          activeChat().renderMessage({ role: "system", content: "**" + backendStartError + "**" });
+        }
       } else {
         setStatus("disconnected");
       }

@@ -434,6 +434,24 @@ export async function checkConnection(scope: Scope = activeScope()): Promise<boo
   }
 }
 
+/** The same probe through the Rust host's HTTP client, bypassing the webview's
+ *  fetch. On Lais's Mac (M1, macOS 26.5, 2026-09-30) the webview's fetch to
+ *  127.0.0.1:5000 kept failing for the whole page session once it had been
+ *  refused while the backend was still starting — the backend was listening
+ *  40 s before the "not reachable" dialog and answered an iframe load, but
+ *  never the probe. The native client has no such memory. */
+export async function checkConnectionNative(scope: Scope = activeScope()): Promise<boolean> {
+  try {
+    const conn = scope.connection;
+    const headers = new Headers();
+    if (conn.token) headers.set("Authorization", `Bearer ${conn.token}`);
+    const res = await (await nativeFetchP)(`${conn.url}/mux/agents`, { headers });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** The backend's self-reported wheel version from /mux/health.
  *  `null` = the backend answered but reports no version (pre-2.6.16 — stale by
  *  definition). `undefined` = the probe itself failed, so don't judge. */

@@ -19,3 +19,12 @@ export async function readDesktopLog(): Promise<string> {
     return "";
   }
 }
+
+/** Tail of backend.log read by the shell (works with the backend down). */
+export async function readBackendLog(): Promise<string> {
+  try {
+    return await invoke<string>("read_backend_log");
+  } catch {
+    return "";
+  }
+}
