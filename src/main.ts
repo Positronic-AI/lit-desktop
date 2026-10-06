@@ -1409,7 +1409,7 @@ function getCommands(): Command[] {
       const slug = t.slug || t.name;
       cmds.push({
         id: `place-${connId}-${slug}`,
-        label: `Open chat tab: ${t.name} · ${server}`,
+        label: `Open workspace tab: ${t.name} · ${server}`,
         icon: (t.name || "?")[0].toUpperCase(),
         action: () => openChatTab(connId, slug),
       });
