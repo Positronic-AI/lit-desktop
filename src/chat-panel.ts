@@ -945,6 +945,8 @@ export class ChatPanel {
   agents: Agent[] = [];
   private channelWs: WebSocket | null = null;
   private telemetryWs: WebSocket | null = null;
+  /** Bumped per connectWebSocket; a mint that loses the race closes its socket. */
+  private wsGen = 0;
   private knownMessageIds = new Set<string>();
   private reactionsByMessage = new Map<string, Reaction[]>();
   private hiddenAgents = new Set<string>();
@@ -1791,10 +1793,12 @@ export class ChatPanel {
 
   /** Reaction events arrive on the telemetry socket, not the channel WS —
    *  same split as the webapp. One socket per panel, lazy reconnect. */
-  private connectTelemetry(): void {
+  private async connectTelemetry(): Promise<void> {
     this.telemetryWs?.close();
     try {
-      this.telemetryWs = createTelemetryWebSocket(this.scope);
+      const ws = await createTelemetryWebSocket(this.scope);
+      if (this.disposed) { ws.close(); return; }
+      this.telemetryWs = ws;
     } catch {
       return;
     }
@@ -2840,9 +2844,13 @@ export class ChatPanel {
 
   // --- WebSocket ---
 
-  private connectWebSocket(channelId: string): void {
-    this.channelWs = createChannelWebSocket(channelId, this.scope);
-    if (!this.telemetryWs) this.connectTelemetry();
+  private async connectWebSocket(channelId: string): Promise<void> {
+    // The ticket mint is a round trip; a channel switch during it wins.
+    const gen = ++this.wsGen;
+    const ws = await createChannelWebSocket(channelId, this.scope);
+    if (gen !== this.wsGen || this.disposed) { ws.close(); return; }
+    this.channelWs = ws;
+    if (!this.telemetryWs) void this.connectTelemetry();
 
     this.channelWs.onopen = () => {
       this.wsReconnectAttempt = 0;

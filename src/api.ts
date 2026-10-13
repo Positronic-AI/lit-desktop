@@ -815,14 +815,42 @@ export async function uploadPath(
   return { url: `${scope.connection.url}/mux${data.url}`, name: data.original_name || data.filename || path.split("/").pop() || "file" };
 }
 
+/** A single-use, 30 s ticket for a WebSocket handshake (CASA 2.1.1): the
+ *  bearer stays in a header and the socket URL carries only the ticket. null
+ *  when the connection has no bearer (local mode needs none) or the server
+ *  predates the route (an older sidecar or jovai) — then the caller falls back
+ *  to `?token=`, which such servers still accept. */
+export async function wsTicket(conn: Connection): Promise<string | null> {
+  if (!conn.token) return null;
+  try { await ensureFreshToken(conn); } catch { /* a stale token still tries */ }
+  try {
+    const res = await hostFetch(`${conn.url}/mux/ws-ticket`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${conn.token}`, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { ticket?: string };
+    return data.ticket || null;
+  } catch {
+    return null;
+  }
+}
+
+function wsAuthParams(conn: Connection, ticket: string | null): URLSearchParams {
+  const params = new URLSearchParams();
+  if (ticket) params.set("ticket", ticket);
+  else if (conn.token) params.set("token", conn.token);
+  return params;
+}
+
 /** The telemetry WS — reaction events (and other activity) arrive here as
  *  `telemetry_batch` frames, on a separate socket from the channel WS (same
  *  split as the webapp). Same native-shim routing as the channel WS. */
-export function createTelemetryWebSocket(scope: Scope = activeScope()): WebSocket {
+export async function createTelemetryWebSocket(scope: Scope = activeScope()): Promise<WebSocket> {
   const conn = scope.connection;
   const wsUrl = conn.url.replace(/^http/, "ws");
-  const params = new URLSearchParams();
-  if (conn.token) params.set("token", conn.token);
+  const params = wsAuthParams(conn, await wsTicket(conn));
   const full = `${wsUrl}/mux/ws/telemetry?${params.toString()}`;
   if (useNativeSocket(full)) {
     return new NativeWebSocketShim(full) as unknown as WebSocket;
@@ -851,14 +879,13 @@ export async function searchChannelMessages(
   return data.results || [];
 }
 
-export function createChannelWebSocket(channelId: string, scope: Scope = activeScope()): WebSocket {
+export async function createChannelWebSocket(channelId: string, scope: Scope = activeScope()): Promise<WebSocket> {
   const conn = scope.connection;
   const wsUrl = conn.url.replace(/^http/, "ws");
-  // Token as query param — the same mechanism the webapp client uses against
-  // these endpoints (WS has no headers). Team scoping rides along for remote
-  // hosts, matching the webapp's channel WS URL shape.
-  const params = new URLSearchParams();
-  if (conn.token) params.set("token", conn.token);
+  // A single-use ticket in the query (WS has no headers), as the web app does;
+  // `?token=` only against a server without the ticket route. Team scoping
+  // rides along for remote hosts, matching the webapp's channel WS URL shape.
+  const params = wsAuthParams(conn, await wsTicket(conn));
   params.set("team", scope.team);
   const full = `${wsUrl}/mux/ws/channel/${channelId}?${params.toString()}`;
   if (useNativeSocket(full)) {
@@ -869,10 +896,9 @@ export function createChannelWebSocket(channelId: string, scope: Scope = activeS
 
 /** Presence v1: the attach pipe's socket. Same native-shim routing as the
  *  channel WS — the Tauri webview cannot open remote WebSockets directly. */
-export function createRemoteAttachWebSocket(conn: Connection): WebSocket {
+export async function createRemoteAttachWebSocket(conn: Connection): Promise<WebSocket> {
   const wsUrl = conn.url.replace(/^http/, "ws");
-  const params = new URLSearchParams();
-  if (conn.token) params.set("token", conn.token);
+  const params = wsAuthParams(conn, await wsTicket(conn));
   const full = `${wsUrl}/mux/ws/remote/attach?${params.toString()}`;
   if (useNativeSocket(full)) {
     return new NativeWebSocketShim(full) as unknown as WebSocket;

@@ -122,7 +122,7 @@ class AttachPipe {
     } catch { /* default stands */ }
 
     try {
-      const ws = createRemoteAttachWebSocket(conn);
+      const ws = await createRemoteAttachWebSocket(conn);
       this.ws = ws;
       ws.onopen = () => {
         this.backoffMs = 5000;
@@ -246,9 +246,9 @@ async function handleRpcFrame(ws: WebSocket, frame: { id: string; op?: string; p
  *  death, or local WS close. */
 const streamBridges = new Map<string, { local: WebSocket; pipe: WebSocket }>();
 
-function openStreamBridge(pipe: WebSocket, sub: string, channelId: string, team: string): void {
+async function openStreamBridge(pipe: WebSocket, sub: string, channelId: string, team: string): Promise<void> {
   closeStreamBridge(sub);
-  const local = createChannelWebSocket(channelId, localScope(team));
+  const local = await createChannelWebSocket(channelId, localScope(team));
   local.onmessage = (ev) => {
     if (pipe.readyState !== WebSocket.OPEN) { closeStreamBridge(sub); return; }
     try {

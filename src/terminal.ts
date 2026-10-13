@@ -12,7 +12,7 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { getServer, ensureFreshToken, type Connection } from "./api";
+import { getServer, wsTicket, type Connection } from "./api";
 
 const BRIDGE_COLS = 200;
 const BRIDGE_ROWS = 50;
@@ -55,8 +55,11 @@ export function openTerminal(container: HTMLElement, channelId: string, conn?: C
   void (async () => {
     let tokenQ = "";
     if (conn) {
-      try { await ensureFreshToken(conn); } catch { /* stale token still tries */ }
-      if (conn.token) tokenQ = `&token=${encodeURIComponent(conn.token)}`;
+      // A single-use ticket in the URL; `?token=` only against a server that
+      // predates the ticket route (wsTicket refreshes the bearer first).
+      const ticket = await wsTicket(conn);
+      if (ticket) tokenQ = `&ticket=${encodeURIComponent(ticket)}`;
+      else if (conn.token) tokenQ = `&token=${encodeURIComponent(conn.token)}`;
     }
     if (currentChannelId !== channelId) return; // closed/re-opened mid-await
     const base = (conn?.url ?? getServer().url).replace(/^http/, "ws");
