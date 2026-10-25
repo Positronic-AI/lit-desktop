@@ -40,14 +40,14 @@ export async function linkThisComputer(conn: Connection): Promise<void> {
 
 export async function unlinkThisComputer(conn: Connection): Promise<void> {
   try {
-    await runLit(["unlink", "--remote"]);
+    await runLit(["unlink", homeUrl(conn), "--remote"]);  // this home only; other homes keep their links
   } finally {
     setConnectionLinked(conn.id, null);
   }
 }
 
-/** The sidecar's own view of the link (`lit link --status`), for a status line later. */
-export async function linkStatus(): Promise<{ linked: boolean; name?: string; home?: string; services?: string[] } | null> {
+/** The sidecar's own view of the links (`lit link --status`): every home this computer is linked to. */
+export async function linkStatus(): Promise<{ linked: boolean; homes?: { url: string; name: string; home: string; slug: string; services: string[] }[] } | null> {
   try {
     return JSON.parse(await runLit(["link", "--status"]));
   } catch {
