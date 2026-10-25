@@ -183,6 +183,9 @@ export interface Connection {
    *  desktop dials OUT and holds the pipe; off by default, instantly
    *  revocable by closing it). */
   remoteAccess?: boolean;
+  /** Host affinity: this computer is linked to that server as hands for its
+   *  channels (`lit link` under the hood: key, tunnel, mounts, always-on). */
+  linked?: { name: string; home: string; at: string };
 }
 
 // ---- Scope ----
@@ -229,6 +232,14 @@ function loadConnections(): Connection[] {
 
 let connections: Connection[] = loadConnections();
 let activeConnectionId = localStorage.getItem(ACTIVE_CONNECTION_KEY) || "local";
+
+/** Record (or clear) the `lit link` state of a connection. */
+export function setConnectionLinked(id: string, linked: Connection["linked"] | null): void {
+  const c = connections.find((x) => x.id === id);
+  if (!c) return;
+  if (linked) c.linked = linked; else delete c.linked;
+  persistConnections();
+}
 
 function persistConnections(): void {
   localStorage.setItem(

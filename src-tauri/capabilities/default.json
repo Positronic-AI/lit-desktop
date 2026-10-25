@@ -23,8 +23,8 @@
     {
       "identifier": "shell:allow-spawn",
       "allow": [
-        { "name": "binaries/lit-server", "sidecar": true },
-        { "name": "binaries/jovai-server", "sidecar": true }
+        { "name": "binaries/lit-server", "sidecar": true, "args": true },
+        { "name": "binaries/jovai-server", "sidecar": true, "args": true }
       ]
     },
     "shell:allow-kill"

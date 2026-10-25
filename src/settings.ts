@@ -16,6 +16,7 @@ import {
   type Connection, type Scope,
 } from "./api";
 import { setRemoteAccess } from "./remote-access";
+import { linkThisComputer, unlinkThisComputer } from "./link-computer";
 import { PoolGroup, PoolEntry, buildModelPool, tupleLabel, attachPoolMenuContent } from "./model-pool";
 
 interface VendorMeta {
@@ -492,6 +493,31 @@ function renderServers(): void {
         ` Remote access — let me open this desktop's channels from ${c.name}'s web portal`));
       raRow.appendChild(raLabel);
       card.appendChild(raRow);
+
+      // Host affinity: lend this computer's hands to channels that live on the
+      // server. The toggle runs `lit link` / `lit unlink` through the sidecar;
+      // the link outlives the app (always-on user services).
+      const lkRow = el("div", "conn-remote-row");
+      const lkLabel = el("label", "conn-remote-label");
+      const lkBox = document.createElement("input");
+      lkBox.type = "checkbox";
+      lkBox.checked = !!c.linked;
+      const lkText = document.createTextNode(c.linked
+        ? ` Link this computer — channels on ${c.name} can run here (linked as "${c.linked.name}")`
+        : ` Link this computer — let channels on ${c.name} run with this computer's files and tools`);
+      lkBox.addEventListener("change", async () => {
+        lkBox.disabled = true;
+        try {
+          if (lkBox.checked) await linkThisComputer(c); else await unlinkThisComputer(c);
+        } catch (e: any) {
+          const ok = await ask(`${e?.message || e}`, { title: "Link this computer", kind: "error" }).catch(() => false);
+          void ok;
+        }
+        renderServers();
+      });
+      lkLabel.append(lkBox, lkText);
+      lkRow.appendChild(lkLabel);
+      card.appendChild(lkRow);
     }
     list.appendChild(card);
   }
