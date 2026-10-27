@@ -3,10 +3,13 @@
 // The server's Settings → Computers tells people to install this app and flip
 // one switch. The switch does exactly what the command line does: it asks the
 // server for a device token (the phone's credential, reused), then runs the
-// sidecar as `lit link <server> <token> --name <device>` which mints a key,
-// opens the reverse tunnel, mounts the home's memory and the affinity
-// channels' stores, and leaves all of it running as user services. Off runs
-// `lit unlink --remote`. Nothing here is required to keep running afterwards.
+// sidecar as `lit hands <server> <token> --name <device>`, which installs the
+// always-on hands service (systemd --user, launchd, or a Windows scheduled
+// task) that dials the home over ONE outbound connection and serves turns
+// here: no ssh server, no tunnel, no mounts — memory and channel stores are
+// caches the home fills (docs/plans/hands-service-2026-10-26.md). Off runs
+// `lit hands --uninstall <server>` and removes the host record on the home.
+// Nothing in this window has to keep running afterwards; the service does.
 import { Command as ShellCommand } from "@tauri-apps/plugin-shell";
 import { Connection, authHeaders, ensureFreshToken, setConnectionLinked } from "./api";
 import { brand } from "./brand";
@@ -34,22 +37,31 @@ export async function linkThisComputer(conn: Connection): Promise<void> {
   if (!r.ok) throw new Error(`The server would not issue a link token (${r.status}). Sign in again and retry.`);
   const { token } = await r.json();
   const name = (getDeviceName() || "computer").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "computer";
-  await runLit(["link", homeUrl(conn), token, "--name", name, "--location", "desktop app"]);
+  await runLit(["hands", homeUrl(conn), token, "--name", name]);
   setConnectionLinked(conn.id, { name, home: conn.name, at: new Date().toISOString() });
 }
 
 export async function unlinkThisComputer(conn: Connection): Promise<void> {
+  const name = conn.linked?.name;
   try {
-    await runLit(["unlink", homeUrl(conn), "--remote"]);  // this home only; other homes keep their links
+    await runLit(["hands", "--uninstall", homeUrl(conn)]);  // this home only; other homes keep their service
+    // The host record on the home outlives the service (Settings → Computers would
+    // still list this computer, offline). Drop it too; best effort.
+    if (name) {
+      try {
+        await ensureFreshToken(conn);
+        await fetch(`${homeUrl(conn)}/mux/hosts/${encodeURIComponent(name)}`, { method: "DELETE", headers: authHeaders(conn) });
+      } catch { /* the service is gone either way */ }
+    }
   } finally {
     setConnectionLinked(conn.id, null);
   }
 }
 
-/** The sidecar's own view of the links (`lit link --status`): every home this computer is linked to. */
-export async function linkStatus(): Promise<{ linked: boolean; homes?: { url: string; name: string; home: string; slug: string; services: string[] }[] } | null> {
+/** The sidecar's own view (`lit hands --status`): every home this computer serves, and whether the service runs. */
+export async function linkStatus(): Promise<{ platform: string; homes: { url: string; name: string; linked_at: string; slug: string; service: string; running: boolean }[] } | null> {
   try {
-    return JSON.parse(await runLit(["link", "--status"]));
+    return JSON.parse(await runLit(["hands", "--status"]));
   } catch {
     return null;
   }
