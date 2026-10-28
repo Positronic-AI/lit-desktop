@@ -403,6 +403,10 @@ async function renderMobilePairing(root: HTMLElement): Promise<void> {
 
 let serversRoot: HTMLElement;
 
+/** What the "Link this computer" toggle last reported, per connection — survives the
+ *  re-render that follows every attempt. */
+const linkStatusByConn = new Map<string, { text: string; error: boolean }>();
+
 function renderServers(): void {
   serversRoot.innerHTML = "";
   const active = getActiveConnection();
@@ -505,19 +509,31 @@ function renderServers(): void {
       const lkText = document.createTextNode(c.linked
         ? ` Link this computer — channels on ${c.name} can run here (linked as "${c.linked.name}")`
         : ` Link this computer — let channels on ${c.name} run with this computer's files and tools`);
+      // The toggle reports in the card, never in a dialog: the first Windows test
+      // (2.5.19, 2026-10-28) ticked, failed and unticked in under a second with
+      // nothing on screen — the dialog never appeared and the error was lost.
+      const lkStatus = el("div", "conn-link-status");
+      const st = linkStatusByConn.get(c.id);
+      if (st) { lkStatus.textContent = st.text; lkStatus.classList.toggle("is-error", st.error); }
       lkBox.addEventListener("change", async () => {
         lkBox.disabled = true;
+        const linking = lkBox.checked;
+        linkStatusByConn.set(c.id, { text: linking ? "Linking… the hands service is being installed on this computer (about half a minute)." : "Unlinking…", error: false });
+        lkStatus.textContent = linkStatusByConn.get(c.id)!.text; lkStatus.classList.remove("is-error");
         try {
-          if (lkBox.checked) await linkThisComputer(c); else await unlinkThisComputer(c);
+          if (linking) await linkThisComputer(c); else await unlinkThisComputer(c);
+          const now = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          linkStatusByConn.set(c.id, { text: linking ? `Linked at ${now}. Channels on ${c.name} can now run here.` : `Unlinked at ${now}.`, error: false });
         } catch (e: any) {
-          const ok = await ask(`${e?.message || e}`, { title: "Link this computer", kind: "error" }).catch(() => false);
-          void ok;
+          const msg = (e && (e.message || (typeof e === "string" ? e : JSON.stringify(e)))) || "unknown error";
+          linkStatusByConn.set(c.id, { text: `${linking ? "Link" : "Unlink"} failed: ${msg}`, error: true });
         }
         renderServers();
       });
       lkLabel.append(lkBox, lkText);
       lkRow.appendChild(lkLabel);
       card.appendChild(lkRow);
+      if (lkStatus.textContent) card.appendChild(lkStatus);
     }
     list.appendChild(card);
   }
