@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-set-title",
@@ -13,18 +15,49 @@
     {
       "identifier": "http:default",
       "allow": [
-        { "url": "https://**" },
-        { "url": "http://**" },
-        { "url": "https://**:*" },
-        { "url": "http://**:*" }
+        {
+          "url": "https://**"
+        },
+        {
+          "url": "http://**"
+        },
+        {
+          "url": "https://**:*"
+        },
+        {
+          "url": "http://**:*"
+        }
       ]
     },
     "websocket:default",
     {
       "identifier": "shell:allow-spawn",
       "allow": [
-        { "name": "binaries/lit-server", "sidecar": true, "args": true },
-        { "name": "binaries/jovai-server", "sidecar": true, "args": true }
+        {
+          "name": "binaries/lit-server",
+          "sidecar": true,
+          "args": true
+        },
+        {
+          "name": "binaries/jovai-server",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/lit-server",
+          "sidecar": true,
+          "args": true
+        },
+        {
+          "name": "binaries/jovai-server",
+          "sidecar": true,
+          "args": true
+        }
       ]
     },
     "shell:allow-kill"
