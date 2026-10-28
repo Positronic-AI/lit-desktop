@@ -11,7 +11,7 @@
 // `lit hands --uninstall <server>` and removes the host record on the home.
 // Nothing in this window has to keep running afterwards; the service does.
 import { Command as ShellCommand } from "@tauri-apps/plugin-shell";
-import { Connection, authHeaders, ensureFreshToken, setConnectionLinked } from "./api";
+import { Connection, authHeaders, ensureFreshToken, hostFetch, setConnectionLinked } from "./api";
 import { brand } from "./brand";
 import { getDeviceName } from "./remote-access";
 
@@ -30,7 +30,9 @@ function homeUrl(conn: Connection): string {
 
 export async function linkThisComputer(conn: Connection): Promise<void> {
   await ensureFreshToken(conn);
-  const r = await fetch(`${homeUrl(conn)}/mux/device-link`, {
+  // hostFetch, not the webview's fetch: a packaged webview cannot reach a remote
+  // server directly (2026-10-28, Windows 2.5.18: "Failed to fetch" on the toggle).
+  const r = await hostFetch(`${homeUrl(conn)}/mux/device-link`, {
     method: "POST", headers: { ...authHeaders(conn), "Content-Type": "application/json" },
     body: JSON.stringify({ name: "computer" }),
   });
@@ -50,7 +52,7 @@ export async function unlinkThisComputer(conn: Connection): Promise<void> {
     if (name) {
       try {
         await ensureFreshToken(conn);
-        await fetch(`${homeUrl(conn)}/mux/hosts/${encodeURIComponent(name)}`, { method: "DELETE", headers: authHeaders(conn) });
+        await hostFetch(`${homeUrl(conn)}/mux/hosts/${encodeURIComponent(name)}`, { method: "DELETE", headers: authHeaders(conn) });
       } catch { /* the service is gone either way */ }
     }
   } finally {
