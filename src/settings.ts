@@ -485,7 +485,13 @@ function renderServers(): void {
     // meaningful on signed-in keycloak connections (the pipe reuses that
     // identity). The desktop dials out; toggling off closes the pipe now.
     if (c.id !== "local" && c.auth === "keycloak" && c.refreshToken && signedInUser(c)) {
+      // The card itself selects the configured connection on click and re-renders
+      // the list. A click on a checkbox inside it would bubble there, the input
+      // would be replaced mid-click, and the browser drops the change event of a
+      // disconnected input — the toggle ticked, unticked and did nothing (porch VM,
+      // 2.5.19/2.5.20, 2026-10-28). Clicks on these rows stay in the rows.
       const raRow = el("div", "conn-remote-row");
+      raRow.addEventListener("click", (e) => e.stopPropagation());
       const raLabel = el("label", "conn-remote-label");
       const raBox = document.createElement("input");
       raBox.type = "checkbox";
@@ -502,6 +508,7 @@ function renderServers(): void {
       // server. The toggle runs `lit link` / `lit unlink` through the sidecar;
       // the link outlives the app (always-on user services).
       const lkRow = el("div", "conn-remote-row");
+      lkRow.addEventListener("click", (e) => e.stopPropagation());
       const lkLabel = el("label", "conn-remote-label");
       const lkBox = document.createElement("input");
       lkBox.type = "checkbox";
