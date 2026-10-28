@@ -13,7 +13,7 @@
 import { Command as ShellCommand } from "@tauri-apps/plugin-shell";
 import { Connection, authHeaders, ensureFreshToken, hostFetch, setConnectionLinked } from "./api";
 import { brand } from "./brand";
-import { getDeviceName } from "./remote-access";
+import { getDeviceName, hasDeviceName } from "./remote-access";
 
 async function runLit(args: string[]): Promise<string> {
   const cmd = ShellCommand.sidecar(`binaries/${brand.sidecarName}`, args);
@@ -38,8 +38,18 @@ export async function linkThisComputer(conn: Connection): Promise<void> {
   });
   if (!r.ok) throw new Error(`The server would not issue a link token (${r.status}). Sign in again and retry.`);
   const { token } = await r.json();
-  const name = (getDeviceName() || "computer").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "computer";
-  await runLit(["hands", homeUrl(conn), token, "--name", name]);
+  // The host's name on the home: the device name the person set, else the machine's
+  // own hostname (the sidecar's default). The app's display label ("LIT desktop") is
+  // not a name — every Windows desktop would link as "lit-desktop" (porch VM, 2.5.22).
+  const args = ["hands", homeUrl(conn), token];
+  if (hasDeviceName()) {
+    const custom = getDeviceName().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
+    if (custom) args.push("--name", custom);
+  }
+  await runLit(args);
+  const home = homeUrl(conn);
+  const st = await linkStatus().catch(() => null);
+  const name = st?.homes?.find((h) => h.url.replace(/\/$/, "") === home)?.name || home.replace(/^https?:\/\//, "");
   setConnectionLinked(conn.id, { name, home: conn.name, at: new Date().toISOString() });
 }
 

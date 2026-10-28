@@ -49,6 +49,11 @@ export function getDeviceName(): string {
   return localStorage.getItem(DEVICE_NAME_KEY) || `${brand.displayName} desktop`;
 }
 
+/** True when the person named this device; the default is only a display label. */
+export function hasDeviceName(): boolean {
+  return !!localStorage.getItem(DEVICE_NAME_KEY);
+}
+
 export function setDeviceName(name: string): void {
   localStorage.setItem(DEVICE_NAME_KEY, name.trim().slice(0, 64));
   // Re-announce under the new name on every live pipe.

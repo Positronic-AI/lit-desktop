@@ -521,12 +521,18 @@ function renderServers(): void {
       // nothing on screen — the dialog never appeared and the error was lost.
       const lkStatus = el("div", "conn-link-status");
       const st = linkStatusByConn.get(c.id);
-      if (st) { lkStatus.textContent = st.text; lkStatus.classList.toggle("is-error", st.error); }
+      const showStatus = (text: string, error: boolean, busy: boolean) => {
+        lkStatus.textContent = text;
+        lkStatus.hidden = !text;
+        lkStatus.classList.toggle("is-error", error);
+        lkStatus.classList.toggle("is-busy", busy);
+      };
+      showStatus(st?.text || "", !!st?.error, false);
       lkBox.addEventListener("change", async () => {
         lkBox.disabled = true;
         const linking = lkBox.checked;
-        linkStatusByConn.set(c.id, { text: linking ? "Linking… the hands service is being installed on this computer (about half a minute)." : "Unlinking…", error: false });
-        lkStatus.textContent = linkStatusByConn.get(c.id)!.text; lkStatus.classList.remove("is-error");
+        linkStatusByConn.set(c.id, { text: linking ? "Linking… installing the hands service on this computer (about half a minute)." : "Unlinking…", error: false });
+        showStatus(linkStatusByConn.get(c.id)!.text, false, true);
         try {
           if (linking) await linkThisComputer(c); else await unlinkThisComputer(c);
           const now = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -540,7 +546,7 @@ function renderServers(): void {
       lkLabel.append(lkBox, lkText);
       lkRow.appendChild(lkLabel);
       card.appendChild(lkRow);
-      if (lkStatus.textContent) card.appendChild(lkStatus);
+      card.appendChild(lkStatus);   // always in the card: the first build only attached it when it already had text, so "Linking…" never showed
     }
     list.appendChild(card);
   }
