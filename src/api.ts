@@ -678,12 +678,15 @@ export async function postChannelMessage(
   content: string,
   scope: Scope = activeScope(),
   source?: string,
-): Promise<void> {
-  await apiFetch(`/channels/${channelId}/messages`, {
+): Promise<{ message_id?: string }> {
+  // The server's id for the persisted message — the local echo adopts it so a
+  // reaction that lands before the server copy renders finds its element.
+  const res = await apiFetch<{ message_id?: string }>(`/channels/${channelId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content, team: scope.team, ...(source ? { source } : {}) }),
   }, scope);
+  return res || {};
 }
 
 // ---- Session restart (2026-09-10) ----

@@ -3483,7 +3483,7 @@ export class ChatPanel {
       }
     }
 
-    this.renderMessage({ role: "user", content, timestamp: new Date().toISOString() });
+    const echo = this.renderMessage({ role: "user", content, timestamp: new Date().toISOString() });
     if (this.streamingEl) {
       this.messagesEl.appendChild(this.streamingEl);
       this.observeForPin(this.streamingEl);
@@ -3514,7 +3514,16 @@ export class ChatPanel {
         if (widgets.length > 0) envelope.widgets = widgets;
         outgoing = `<context>\n${JSON.stringify(envelope, null, 2)}\n</context>\n\n${content}`;
       }
-      await postChannelMessage(this.currentChannel.id, outgoing, this.scope);
+      const posted = await postChannelMessage(this.currentChannel.id, outgoing, this.scope);
+      // The echo gets the server's id: a reaction on this message (the agent's
+      // 👍 on "Test message from the desktop app", 2026-11-01) arrived over
+      // telemetry before any element carried the id and only showed on reload.
+      const id = posted?.message_id;
+      if (id && echo && !echo.dataset.messageId) {
+        echo.dataset.messageId = id;
+        this.knownMessageIds.add(id);
+        if (this.reactionsByMessage.get(id)?.length) this.renderReactionsRow(echo, id);
+      }
     } catch (err) {
       this.renderMessage({ role: "system", content: `Failed to send: ${err}` });
     }
