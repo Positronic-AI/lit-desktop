@@ -9,7 +9,7 @@ import {
   startOAuth, oauthStatus, submitOAuthCode, cancelOAuth,
   fetchFullAgents, getAgent, saveAgent, deleteAgent,
   fetchDefaultPrompt,
-  getConnections, saveConnection, removeConnection,
+  getConnections, saveConnection, removeConnection, hostFetch,
   getActiveConnection, setActiveConnectionId,
   startDeviceAuth, pollDeviceToken, signedInUser, activeScope,
   type Credential, type Vendor, type CredMode, type FullAgent,
@@ -561,8 +561,10 @@ function renderServers(): void {
   serversRoot.appendChild(reveal);
 }
 
-/** Focused add-connection screen. Auth server + realm are only needed until
- *  servers expose auth discovery; blank means "no auth" (e.g. a LAN box). */
+/** Focused add-connection screen. ONE field: the server URL. The server's
+ *  /mux/connect-info answers with its name and sign-in details (auth server,
+ *  realm), so nobody types a realm. A server that does not answer (older, or an
+ *  open LAN box) falls back to the manual fields. */
 function openAddConnection(): void {
   bodyEl.innerHTML = "";
   const back = el("button", "settings-mini-btn ghost", "← Back to setup");
@@ -571,7 +573,7 @@ function openAddConnection(): void {
 
   const panel = el("div", "cred-wizard");
   panel.appendChild(el("div", "wizard-step-label", "Add a connection"));
-  panel.appendChild(el("p", "settings-intro", "Point the app at a LIT server. Auth server and realm are only needed for servers with sign-in — leave them blank for an open LAN box."));
+  panel.appendChild(el("p", "settings-intro", "Paste the server's address — https://app.jov.ai, or http://192.168.1.20:8080 for a box on your network. The server tells the app how to sign in."));
 
   const mkInput = (placeholder: string): HTMLInputElement => {
     const i = document.createElement("input");
@@ -579,36 +581,76 @@ function openAddConnection(): void {
     i.placeholder = placeholder;
     return i;
   };
-  const nameInput = mkInput("Name (e.g. JovAI)");
   const urlInput = mkInput("Server URL (https://app.jov.ai)");
+  const found = el("div", "settings-hint");
+  found.style.display = "none";
+  const manual = el("div");
+  manual.style.display = "none";
+  const nameInput = mkInput("Name (e.g. JovAI)");
   const authInput = mkInput("Auth server (https://auth.lit.ai) — optional");
   const realmInput = mkInput("Realm (JOV-AI) — optional");
+  manual.append(el("p", "settings-intro", "This server did not describe itself — fill these in by hand (blank auth = open LAN box)."), nameInput, authInput, realmInput);
 
   const add = el("button", "settings-primary-btn", "Add connection") as HTMLButtonElement;
   const err = el("div", "settings-error");
   err.style.display = "none";
-  add.addEventListener("click", () => {
-    const name = nameInput.value.trim();
+
+  // What the server says about itself, once the URL is in.
+  let info: { name?: string; auth?: { type?: string; server?: string; realm?: string } } | null = null;
+  let discovering = false;
+  const discover = async (): Promise<void> => {
     const rawUrl = urlInput.value.trim().replace(/\/+$/, "");
-    if (!name || !rawUrl) {
-      err.textContent = "A name and server URL are required.";
+    if (!/^https?:\/\//.test(rawUrl) || discovering) return;
+    discovering = true;
+    found.textContent = "Asking the server…";
+    found.style.display = "";
+    try {
+      const res = await hostFetch(`${rawUrl}/mux/connect-info`, { method: "GET" });
+      info = res.ok ? await res.json() : null;
+    } catch {
+      info = null;
+    }
+    discovering = false;
+    if (info && info.name) {
+      const a = info.auth || {};
+      found.textContent = a.type === "keycloak"
+        ? `${info.name} — sign-in via ${a.server} (${a.realm})`
+        : `${info.name} — no sign-in (single-user server)`;
+      manual.style.display = "none";
+    } else {
+      found.textContent = "";
+      found.style.display = "none";
+      manual.style.display = "";
+    }
+  };
+  urlInput.addEventListener("change", () => { void discover(); });
+  urlInput.addEventListener("blur", () => { void discover(); });
+
+  add.addEventListener("click", async () => {
+    const rawUrl = urlInput.value.trim().replace(/\/+$/, "");
+    if (!rawUrl) {
+      err.textContent = "A server URL is required.";
       err.style.display = "";
       return;
     }
-    const authUrl = authInput.value.trim().replace(/\/+$/, "");
+    if (!info && manual.style.display === "none") await discover();
+    const a = info?.auth || {};
+    const name = (info?.name || nameInput.value.trim() || rawUrl.replace(/^https?:\/\//, ""));
+    const authUrl = (a.type === "keycloak" && a.server ? a.server : authInput.value.trim()).replace(/\/+$/, "");
+    const realm = a.type === "keycloak" && a.realm ? a.realm : (realmInput.value.trim() || undefined);
     const conn: Connection = {
       id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || `srv-${Date.now()}`,
       name,
       url: rawUrl,
       auth: authUrl ? "keycloak" : "none",
       authUrl: authUrl || undefined,
-      realm: realmInput.value.trim() || undefined,
+      realm,
     };
     saveConnection(conn);
     renderSetup();
   });
 
-  panel.append(nameInput, urlInput, authInput, realmInput, add, err);
+  panel.append(urlInput, found, manual, add, err);
   bodyEl.appendChild(panel);
 }
 
