@@ -33,6 +33,9 @@ import {
   getInterrupt,
   fetchUsage,
   toggleChannelReaction,
+  pinChannelMessage,
+  unpinChannelMessage,
+  fetchChannelPins,
   createTelemetryWebSocket,
   type Reaction,
   fetchBackendStatus,
@@ -781,6 +784,7 @@ interface RenderableMessage {
   file_path?: string;
   metadata?: Record<string, unknown>;
   reactions?: Reaction[];
+  pinned?: boolean;
 }
 
 // Attachment types our own surfaces render: images → lightbox, text-family →
@@ -797,11 +801,11 @@ const REACTION_TOOLTIPS: Record<string, string> = {
   "🤣": "funny", "🤔": "thinking", "👀": "looking at this", "🚀": "shipped",
 };
 
-const HEADER_ITEMS_DEFAULT_ORDER = ["timestamp", "duration", "copy", "path", "session", "delete"];
+const HEADER_ITEMS_DEFAULT_ORDER = ["timestamp", "duration", "copy", "pin", "path", "session", "delete"];
 const HEADER_ITEMS_DEFAULT_FAVS = ["timestamp"];
 
 const HEADER_ITEM_LABELS: Record<string, string> = {
-  timestamp: "Timestamp", duration: "Response time", copy: "Copy content",
+  timestamp: "Timestamp", duration: "Response time", copy: "Copy content", pin: "Pin",
   path: "Copy path", session: "Copy session ID", delete: "Delete",
 };
 
@@ -811,6 +815,7 @@ const HEADER_ITEM_ICONS: Record<string, string> = {
   copy: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>',
   path: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>',
   session: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M21 10.12h-6.78l2.74-2.82c-2.73-2.7-7.15-2.8-9.88-.1-2.73 2.71-2.73 7.08 0 9.79s7.15 2.71 9.88 0A6.954 6.954 0 0 0 19 12.53h2c0 1.55-.44 3.03-1.25 4.35-2.39 3.9-7.46 5.14-11.33 2.76S3.28 12.17 5.67 8.28c2.39-3.9 7.46-5.14 11.33-2.76l.11.08 2.47-2.53V10.12z"/></svg>',
+  pin: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>',
   delete: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>',
 };
 
@@ -839,6 +844,7 @@ function isItemVisible(id: string, msg: RenderableMessage): boolean {
     case "copy": return true;
     case "path": return !!msg.file_path;
     case "session": return !!meta.session_id;
+    case "pin": return !!msg.id;
     case "delete": return !!msg.id;
     default: return false;
   }
@@ -865,6 +871,7 @@ function getItemBadgeHtml(id: string, msg: RenderableMessage): string {
       return `${icon} ${escapeHtml(total + ttfb)}`;
     }
     case "copy": return icon;
+    case "pin": return msg.pinned ? `<span class="pin-active">${icon}</span>` : icon;
     case "path": return icon;
     case "session": return `${icon} ${escapeHtml(String(meta.session_id || "").substring(0, 8))}`;
     case "delete": return icon;
@@ -883,6 +890,7 @@ function getItemMenuLabel(id: string, msg: RenderableMessage): string {
       return `Response: ${total}${ttfb}`;
     }
     case "session": return `Session: ${String(meta.session_id || "").substring(0, 8)}`;
+    case "pin": return msg.pinned ? "Unpin" : "Pin";
     default: return HEADER_ITEM_LABELS[id] || id;
   }
 }
@@ -917,6 +925,28 @@ const EFFORT_LEVELS = [
   { value: "high", label: "High" },
 ];
 
+// Knowledge-graph footer: full `type/name` tags, right-aligned, colored by
+// type — the webapp chat-screen's links-row (the desktop used to clip each
+// tag to its last segment and paint them all the same blue; Ben, 2026-11-01).
+const LINK_TAG_CLASS: Record<string, string> = {
+  concepts: "concept-tag", products: "product-tag", people: "people-tag",
+  tickets: "ticket-tag", channels: "channel-tag", backlog: "backlog-tag",
+};
+
+function renderLinksRow(links: string[]): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "links-row";
+  for (const link of links) {
+    const tag = document.createElement("span");
+    const prefix = link.includes("/") ? link.split("/")[0] : link;
+    tag.className = `link-tag ${LINK_TAG_CLASS[prefix] || ""}`.trim();
+    tag.textContent = `#${link}`;
+    tag.title = link;
+    row.appendChild(tag);
+  }
+  return row;
+}
+
 // --- The component ---
 
 export class ChatPanel {
@@ -925,7 +955,7 @@ export class ChatPanel {
 
   // --- Cross-panel touch points main.ts wires up ---
   /** Search button in the channel header was clicked. */
-  onOpenSearch: (() => void) | null = null;
+  onOpenSearch: ((tab?: string) => void) | null = null;
   /** Terminal toggle button in the channel header was clicked. */
   onToggleTerminal: (() => void) | null = null;
   /** "Reload everything" (settings closed, onboarding CTA) — main.ts's loadInitialData. */
@@ -986,6 +1016,10 @@ export class ChatPanel {
   // Timestamp of the last stream_end that carried content — used to suppress the
   // duplicate persisted assistant message that arrives just after (webapp parity).
   private lastStreamEndTime = 0;
+  // The bubble the last stream rendered into: it adopts the persisted
+  // message's id (header toolbar, reactions, pin) when that arrives.
+  private lastStreamedEl: HTMLElement | null = null;
+  private pinnedCount = 0;
 
   // Pending pasted images
   private pendingImageFiles: File[] = [];
@@ -1431,6 +1465,7 @@ export class ChatPanel {
               file_path: msg.file_path,
               metadata: msg.metadata,
               reactions: msg.reactions,
+              pinned: msg.pinned,
             });
           }
           el = this.messagesEl.querySelector(sel);
@@ -1481,6 +1516,9 @@ export class ChatPanel {
       case "path":
         if (msg.file_path) navigator.clipboard.writeText(msg.file_path).catch(() => {});
         break;
+      case "pin":
+        void this.togglePin(msg, el);
+        break;
       case "session": {
         const sid = String((msg.metadata || {}).session_id || "");
         if (sid) navigator.clipboard.writeText(sid).catch(() => {});
@@ -1518,7 +1556,103 @@ export class ChatPanel {
       header.insertBefore(badge, null);
     }
 
+    // A pinned message always shows its pin, favorite or not (webapp parity).
+    if (msg.pinned && !this.headerFavorites.has("pin")) {
+      const badge = document.createElement("span");
+      badge.className = "header-fav fav-pin";
+      badge.innerHTML = getItemBadgeHtml("pin", msg);
+      badge.title = "Unpin";
+      badge.addEventListener("click", (e) => { e.stopPropagation(); void this.togglePin(msg, el); });
+      header.appendChild(badge);
+    }
+
+    // The kebab is always the outermost control.
     header.appendChild(kebabBtn);
+  }
+
+  private async togglePin(msg: RenderableMessage, el: HTMLElement): Promise<void> {
+    const ch = this.currentChannel;
+    if (!ch || !msg.id) return;
+    try {
+      if (msg.pinned) await unpinChannelMessage(ch.id, msg.id, this.scope);
+      else await pinChannelMessage(ch.id, msg.id, this.scope);
+    } catch {
+      return;
+    }
+    msg.pinned = !msg.pinned;
+    const data = this.msgDataMap.get(el);
+    if (data) data.msg.pinned = msg.pinned;
+    const header = el.querySelector(".message-header") as HTMLElement | null;
+    if (header && data) this.renderHeaderFavorites(header, data.msg, el, data.parsed);
+    this.pinnedCount = Math.max(0, this.pinnedCount + (msg.pinned ? 1 : -1));
+    this.renderPinCount();
+    window.dispatchEvent(new CustomEvent("lit-pins-changed", { detail: { channelId: ch.id } }));
+  }
+
+  /** The Pinned tab unpinned a message: drop its badge here too. */
+  noteUnpinned(messageId: string): void {
+    const el = this.messagesEl.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`) as HTMLElement | null;
+    const data = el ? this.msgDataMap.get(el) : undefined;
+    if (el && data) {
+      data.msg.pinned = false;
+      const header = el.querySelector(".message-header") as HTMLElement | null;
+      if (header) this.renderHeaderFavorites(header, data.msg, el, data.parsed);
+    }
+    this.pinnedCount = Math.max(0, this.pinnedCount - 1);
+    this.renderPinCount();
+  }
+
+  /** Header chip: "📌 n", shown only when the channel has pins; opens the Pinned tab. */
+  private renderPinCount(): void {
+    const chip = this.channelActionsEl.querySelector(".pin-count-chip") as HTMLElement | null;
+    if (!chip) return;
+    chip.hidden = this.pinnedCount <= 0;
+    (chip.querySelector(".pin-count") as HTMLElement).textContent = String(this.pinnedCount);
+    chip.title = `${this.pinnedCount} pinned message${this.pinnedCount === 1 ? "" : "s"}`;
+  }
+
+  private async refreshPinCount(): Promise<void> {
+    const ch = this.currentChannel;
+    if (!ch) return;
+    try {
+      const pins = await fetchChannelPins(ch.id, this.scope);
+      if (this.currentChannel?.id !== ch.id) return;
+      this.pinnedCount = pins.length;
+    } catch {
+      this.pinnedCount = 0;
+    }
+    this.renderPinCount();
+  }
+
+  /** The persisted copy of a message this panel just streamed: the bubble
+   *  keeps its rendering and takes the server id, so it gets the header
+   *  toolbar (kebab outermost), reactions and pin without a reload. Before
+   *  this the streamed bubble had none of those until the channel reopened
+   *  (Ben, 2026-11-01: "kebab… incorrect in desktop app"). */
+  private adoptStreamedMessage(raw: { id: string; content: string; from?: string; timestamp?: string;
+    file_path?: string; metadata?: Record<string, unknown>; reactions?: Reaction[]; pinned?: boolean }): void {
+    const el = this.lastStreamedEl;
+    if (!el || !el.isConnected || el.dataset.messageId) return;
+    this.lastStreamedEl = null;
+    el.dataset.messageId = raw.id;
+    this.reactionsByMessage.set(raw.id, raw.reactions || []);
+    const msg: RenderableMessage = {
+      role: "assistant", content: raw.content, id: raw.id, from: raw.from, timestamp: raw.timestamp,
+      file_path: raw.file_path, metadata: raw.metadata, reactions: raw.reactions, pinned: raw.pinned,
+    };
+    const parsed = parseMessageContent(raw.content);
+    const header = el.querySelector(".message-header") as HTMLElement | null;
+    if (header) {
+      header.querySelector(".message-time")?.remove();
+      if (!header.querySelector(".header-spacer")) {
+        const spacer = document.createElement("span");
+        spacer.className = "header-spacer";
+        header.appendChild(spacer);
+      }
+      this.msgDataMap.set(el, { msg, parsed });
+      this.renderHeaderFavorites(header, msg, el, parsed);
+    }
+    this.renderReactionsRow(el, raw.id);
   }
 
   private refreshAllHeaders(): void {
@@ -1670,18 +1804,7 @@ export class ChatPanel {
     renderContentParts(el, parsed.parts, msg.role, this.scope.connection.url);
 
     // Knowledge graph links
-    if (parsed.links.length > 0) {
-      const linksRow = document.createElement("div");
-      linksRow.className = "links-row";
-      for (const link of parsed.links) {
-        const tag = document.createElement("span");
-        tag.className = "link-tag";
-        tag.textContent = `#${link.split("/").pop()}`;
-        tag.title = link;
-        linksRow.appendChild(tag);
-      }
-      el.appendChild(linksRow);
-    }
+    if (parsed.links.length > 0) el.appendChild(renderLinksRow(parsed.links));
 
     if (msg.id) this.renderReactionsRow(el, msg.id);
 
@@ -2762,7 +2885,12 @@ export class ChatPanel {
       return;
     }
 
-    this.channelActionsEl.innerHTML = `<button class="kebab-btn header-btn" title="More">&#8942;</button>`;
+    this.channelActionsEl.innerHTML =
+      `<span class="header-fav pin-count-chip" hidden>${HEADER_ITEM_ICONS.pin}<span class="pin-count"></span></span>` +
+      `<button class="kebab-btn header-btn" title="More">&#8942;</button>`;
+    this.channelActionsEl.querySelector(".pin-count-chip")?.addEventListener("click", () => this.onOpenSearch?.("pinned"));
+    this.pinnedCount = 0;
+    void this.refreshPinCount();
 
     this.channelActionsEl.querySelector(".kebab-btn")?.addEventListener("click", (e) => {
       showContextMenu(e as MouseEvent, [
@@ -2875,7 +3003,7 @@ export class ChatPanel {
             if (this.knownMessageIds.has(msg.id)) continue;
             this.knownMessageIds.add(msg.id);
             if (msg.metadata?.source === "reaction") continue;
-            if (suppressAfterStream(msg.direction)) continue;
+            if (suppressAfterStream(msg.direction)) { this.adoptStreamedMessage(msg); continue; }
             added = true;
             this.renderMessage({
               role: msg.direction === "in" ? "user" : "assistant",
@@ -2886,6 +3014,7 @@ export class ChatPanel {
               file_path: msg.file_path,
               metadata: msg.metadata,
               reactions: msg.reactions,
+              pinned: msg.pinned,
             });
           }
           if (added && document.visibilityState === "visible") {
@@ -2895,7 +3024,9 @@ export class ChatPanel {
           if (!this.knownMessageIds.has(data.id)) {
             this.knownMessageIds.add(data.id);
             if (data.direction !== "in") this.maybeAuthRecheck(data.content, data.metadata);
-            if (data.metadata?.source !== "reaction" && !suppressAfterStream(data.direction)) {
+            if (data.metadata?.source !== "reaction" && suppressAfterStream(data.direction)) {
+              this.adoptStreamedMessage(data);
+            } else if (data.metadata?.source !== "reaction") {
               this.renderMessage({
                 role: data.direction === "in" ? "user" : "assistant",
                 content: data.content,
@@ -2905,6 +3036,7 @@ export class ChatPanel {
                 file_path: data.file_path,
                 metadata: data.metadata,
                 reactions: data.reactions,
+                pinned: data.pinned,
               });
               if (this.streamingEl && data.direction === "in") {
                 this.messagesEl.appendChild(this.streamingEl);
@@ -2919,6 +3051,7 @@ export class ChatPanel {
           // Agent is connecting — show the streaming bubble early so a missed
           // stream_start never causes the first content frames to be dropped.
           if (!this.streamingEl) this.showTypingIndicator();
+          if (typeof data.text === "string" && data.text.trim()) this.showSpinnerLine(data.text);
         } else if (data.type === "stream_start") {
           this.streamingChannels.add(channelId);
           markBusy(`stream:${channelId}`, `${this.currentChannel?.name || channelId} — agent is replying`);
@@ -3073,11 +3206,30 @@ export class ChatPanel {
     const el = document.createElement("div");
     el.className = "message assistant streaming";
     const who = this.currentAgent?.name || "Agent";
-    el.innerHTML = `<div class="message-header"><span class="message-author">${escapeHtml(who)}</span><span class="message-time">now</span></div><div class="message-content"><span class="typing-dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span></div>`;
+    el.innerHTML = `<div class="message-header"><span class="message-author">${escapeHtml(who)}</span><span class="message-time">now</span><span class="header-spacer"></span></div><div class="message-content"><span class="typing-dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span></div>`;
     this.messagesEl.appendChild(el);
     this.observeForPin(el);
     if (!this.userIsScrolledUp) this.scrollToBottom();
     this.streamingEl = el;
+  }
+
+  /** The terminal's live spinner line ("Compacting conversation… (45s · ↓ 1.3k
+   *  tokens)", "Connecting…") carried on `thinking` events — shown where the
+   *  dots are until content arrives, as the webapp does. The desktop used to
+   *  drop the text, so a compaction looked like a stalled reply. */
+  private showSpinnerLine(text: string): void {
+    if (!this.streamingEl || this.streamingText) return;
+    const content = this.streamingEl.querySelector(".message-content") as HTMLElement | null;
+    if (!content) return;
+    let line = content.querySelector(".spinner-line") as HTMLElement | null;
+    if (!line) {
+      content.innerHTML = "";
+      line = document.createElement("span");
+      line.className = "spinner-line";
+      content.appendChild(line);
+    }
+    line.textContent = text.trim();
+    if (!this.userIsScrolledUp) this.scrollToBottom();
   }
 
   // stream_chunk carries a delta (append); stream_replace carries the full
@@ -3187,20 +3339,10 @@ export class ChatPanel {
 
       renderContentParts(contentParent, parsed.parts, "assistant", this.scope.connection.url);
 
-      if (parsed.links.length > 0) {
-        const linksRow = document.createElement("div");
-        linksRow.className = "links-row";
-        for (const link of parsed.links) {
-          const tag = document.createElement("span");
-          tag.className = "link-tag";
-          tag.textContent = `#${link.split("/").pop()}`;
-          tag.title = link;
-          linksRow.appendChild(tag);
-        }
-        contentParent.appendChild(linksRow);
-      }
+      if (parsed.links.length > 0) contentParent.appendChild(renderLinksRow(parsed.links));
 
       this.streamingEl.classList.remove("streaming");
+      this.lastStreamedEl = this.streamingEl;
 
       // Re-pin to the bottom. This final rebuild swaps the streamed scrape for
       // the clean JSONL content and adds collapsible tool sections + the links

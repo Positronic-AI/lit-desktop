@@ -7,6 +7,8 @@ import {
   fetchCalendarDates,
   fetchCalendarDay,
   fetchMessageContent,
+  fetchChannelPins,
+  unpinChannelMessage,
   type CalendarDayMessage,
   fetchApps,
   type AppWidget,
@@ -527,6 +529,7 @@ window.addEventListener("lit-open-app", (e: Event) => {
 registerPanel("search", () => {
   let textDebounce: ReturnType<typeof setTimeout> | undefined;
   let graphDispose: (() => void) | null = null;
+  let pinsUnlisten: (() => void) | null = null;
   return {
     mount(host: HTMLElement) {
       host.innerHTML = `
@@ -535,10 +538,12 @@ registerPanel("search", () => {
             <button class="search-tab active" data-tab="text" type="button">Text</button>
             <button class="search-tab" data-tab="calendar" type="button">Calendar</button>
             <button class="search-tab" data-tab="graph" type="button">Knowledge Graph</button>
+            <button class="search-tab" data-tab="pinned" type="button">Pinned</button>
           </div>
           <div class="search-tab-body" data-body="text"></div>
           <div class="search-tab-body" data-body="calendar" hidden></div>
           <div class="search-tab-body" data-body="graph" hidden></div>
+          <div class="search-tab-body" data-body="pinned" hidden></div>
         </div>`;
       const tabs = Array.from(host.querySelectorAll(".search-tab")) as HTMLElement[];
       const bodies = Array.from(host.querySelectorAll(".search-tab-body")) as HTMLElement[];
@@ -559,9 +564,14 @@ registerPanel("search", () => {
             escapeHtml,
           });
         }
+        if (name === "pinned") mountPinnedView(bodyFor("pinned"));
         if (name === "text") (host.querySelector(".search-input") as HTMLInputElement | null)?.focus();
       };
       tabs.forEach((t) => t.addEventListener("click", () => select(t.dataset.tab!)));
+      (host as any).__selectSearchTab = select;
+      const onPinsChanged = () => { if (!bodyFor("pinned").hidden) mountPinnedView(bodyFor("pinned")); };
+      window.addEventListener("lit-pins-changed", onPinsChanged);
+      pinsUnlisten = () => window.removeEventListener("lit-pins-changed", onPinsChanged);
 
       // --- Text tab ---
       bodyFor("text").innerHTML = `
@@ -612,7 +622,7 @@ registerPanel("search", () => {
       bodyFor("graph").innerHTML =
         `<div class="search-placeholder">Open a channel to explore its knowledge graph.</div>`;
     },
-    dispose() { clearTimeout(textDebounce); graphDispose?.(); },
+    dispose() { clearTimeout(textDebounce); graphDispose?.(); pinsUnlisten?.(); },
   };
 });
 
@@ -766,13 +776,77 @@ function mountCalendarView(host: HTMLElement): void {
   }).catch(() => { gridEl.innerHTML = `<div class="search-status">Failed to load calendar.</div>`; });
 }
 
-/** Open (or focus) the channel search panel and focus its input. */
-function openSearch(): void {
+/** Open (or focus) the channel search panel on a tab (default: text search, input focused). */
+function openSearch(tab?: string): void {
   if (!wm.hasPanel("search")) {
     wm.addPanel({ id: "search", component: "search", title: "Search" });
   }
   wm.focusPanel("search");
-  setTimeout(() => (document.querySelector(".search-input") as HTMLInputElement | null)?.focus(), 40);
+  setTimeout(() => {
+    const host = (document.querySelector(".search-panel") as HTMLElement | null)?.parentElement as any;
+    if (tab && host?.__selectSearchTab) host.__selectSearchTab(tab);
+    else (document.querySelector(".search-input") as HTMLInputElement | null)?.focus();
+  }, 40);
+}
+
+/** Pinned tab: the channel's pinned messages, newest last (conversation order),
+ *  each a card that jumps to the message; the pin icon unpins. Mirrors the
+ *  webapp's Pinned tab beside search (heartbeat-widget). */
+function mountPinnedView(host: HTMLElement): void {
+  const cp = activeChat();
+  const channel = cp.currentChannel;
+  if (!channel) { host.innerHTML = `<div class="search-placeholder">Open a channel first.</div>`; return; }
+  host.innerHTML = `<div class="search-status">Loading…</div><div class="pins-list"></div>`;
+  const status = host.querySelector(".search-status") as HTMLElement;
+  const list = host.querySelector(".pins-list") as HTMLElement;
+  fetchChannelPins(channel.id, cp.scope).then((pins) => {
+    if (cp.currentChannel?.id !== channel.id) return;
+    status.textContent = pins.length ? `${pins.length} pinned` : "";
+    if (!pins.length) {
+      list.innerHTML = `<div class="search-placeholder">Nothing pinned in this channel. Pin a message from its ⋮ menu.</div>`;
+      return;
+    }
+    for (const pin of pins) {
+      const card = document.createElement("div");
+      card.className = "pin-card";
+      const who = pin.direction === "in" || pin.role === "user" ? "You" : (pin.from || "agent");
+      const when = new Date(pin.timestamp);
+      const whenText = isNaN(when.getTime()) ? "" : when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      card.innerHTML =
+        `<div class="pin-card-head"><span class="pin-card-who"></span><span class="pin-card-when"></span>` +
+        `<span class="header-spacer"></span><button class="pin-unpin" type="button" title="Unpin">${PIN_ICON}</button></div>` +
+        `<div class="pin-card-content"></div>`;
+      (card.querySelector(".pin-card-who") as HTMLElement).textContent = who;
+      (card.querySelector(".pin-card-when") as HTMLElement).textContent = whenText;
+      (card.querySelector(".pin-card-content") as HTMLElement).innerHTML = renderMarkdown(messageBody(pin.content), cp.scope.connection.url);
+      card.addEventListener("click", () => { void cp.jumpToMessage(pin.id); });
+      (card.querySelector(".pin-unpin") as HTMLElement).addEventListener("click", async (e) => {
+        e.stopPropagation();
+        try { await unpinChannelMessage(channel.id, pin.id, cp.scope); } catch { return; }
+        card.remove();
+        cp.noteUnpinned(pin.id);
+        const left = list.querySelectorAll(".pin-card").length;
+        status.textContent = left ? `${left} pinned` : "";
+        if (!left) list.innerHTML = `<div class="search-placeholder">Nothing pinned in this channel. Pin a message from its ⋮ menu.</div>`;
+      });
+      list.appendChild(card);
+    }
+  }).catch(() => { status.textContent = "Failed to load pins."; });
+}
+
+const PIN_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>';
+
+/** A stored message's body: the ID/TIMESTAMP/FROM/DIRECTION header lines and
+ *  the LINKS footer stripped, tool-call blocks reduced to a marker. */
+function messageBody(raw: string): string {
+  const lines = raw.split("\n");
+  let i = 0;
+  while (i < lines.length && (/^(ID|TIMESTAMP|FROM|DIRECTION|MODEL):/.test(lines[i]) || lines[i].trim() === "")) i++;
+  let body = lines.slice(i).join("\n");
+  const linkIdx = body.lastIndexOf("\nLINKS: ");
+  if (linkIdx !== -1) body = body.slice(0, linkIdx);
+  body = body.replace(/\x02TOOLJSON[\s\S]*?(?=\x03|$)/g, "⚙ tool call").replace(/\x03/g, "");
+  return body.trim();
 }
 
 /** Wrap literal matches of the query in <mark> (skipped in regex mode). */

@@ -46,6 +46,7 @@ export interface ChannelMessage {
   metadata?: Record<string, unknown>;
   file_path?: string;
   reactions?: Reaction[];
+  pinned?: boolean;
 }
 
 export interface UsageQuota {
@@ -891,6 +892,33 @@ export async function searchChannelMessages(
     scope,
   );
   return data.results || [];
+}
+
+// ---- Pins (webapp heartbeat-widget parity, 2026-11-01) ----
+// Channel-scoped: POST/DELETE /channels/{id}/pins/{message_id}, GET /channels/{id}/pins.
+
+export interface PinnedMessage {
+  id: string;
+  timestamp: string;
+  direction: "in" | "out";
+  from?: string;
+  role?: string;
+  content: string;
+  file?: string;
+}
+
+export async function fetchChannelPins(channelId: string, scope: Scope = activeScope()): Promise<PinnedMessage[]> {
+  const data = await apiFetch<{ pins: PinnedMessage[]; count: number }>(
+    `/channels/${channelId}/pins?team=${encodeURIComponent(scope.team)}`, undefined, scope);
+  return data?.pins || [];
+}
+
+export async function pinChannelMessage(channelId: string, messageId: string, scope: Scope = activeScope()): Promise<void> {
+  await apiFetch(`/channels/${channelId}/pins/${messageId}?team=${encodeURIComponent(scope.team)}`, { method: "POST" }, scope);
+}
+
+export async function unpinChannelMessage(channelId: string, messageId: string, scope: Scope = activeScope()): Promise<void> {
+  await apiFetch(`/channels/${channelId}/pins/${messageId}?team=${encodeURIComponent(scope.team)}`, { method: "DELETE" }, scope);
 }
 
 export async function createChannelWebSocket(channelId: string, scope: Scope = activeScope()): Promise<WebSocket> {
