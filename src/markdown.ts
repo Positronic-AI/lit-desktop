@@ -23,9 +23,12 @@ marked.setOptions({
   async: false,
 });
 
-export function renderMarkdown(text: string): string {
-  // Resolve relative image URLs to the server
-  const serverUrl = getServer().url;
+/** `baseUrl`: the server the message lives on. A tab standing on app.lit.ai
+ *  must resolve `/mux/channel-uploads/…` against app.lit.ai, not the app-active
+ *  (local) connection — every image in a remote tab was broken (2026-11-01). */
+export function renderMarkdown(text: string, baseUrl?: string): string {
+  // Resolve relative image URLs to the server the message lives on
+  const serverUrl = (baseUrl || getServer().url).replace(/\/+$/, "");
   const resolved = text.replace(
     /!\[([^\]]*)\]\((\/mux\/[^)]+)\)/g,
     (_, alt, path) => `![${alt}](${serverUrl}${path})`

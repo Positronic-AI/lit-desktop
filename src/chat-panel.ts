@@ -592,7 +592,7 @@ export function linkifyFilePaths(container: HTMLElement, opts?: { includePre?: b
   }
 }
 
-function renderContentParts(parent: HTMLElement, parts: ContentPart[], role: string) {
+function renderContentParts(parent: HTMLElement, parts: ContentPart[], role: string, baseUrl?: string) {
   for (const part of parts) {
     if (part.type === "text") {
       const content = document.createElement("div");
@@ -632,7 +632,7 @@ function renderContentParts(parent: HTMLElement, parts: ContentPart[], role: str
           content.appendChild(chipRow);
         }
       } else {
-        content.innerHTML = renderMarkdown(part.content || "");
+        content.innerHTML = renderMarkdown(part.content || "", baseUrl);
       }
       linkifyFilePaths(content);
       parent.appendChild(content);
@@ -645,7 +645,7 @@ function renderContentParts(parent: HTMLElement, parts: ContentPart[], role: str
       // CLI's "· summarized" bullets), or another backend's reasoning.
       const el = document.createElement("div");
       el.className = "thinking-content";
-      el.innerHTML = renderMarkdown(part.content || "");
+      el.innerHTML = renderMarkdown(part.content || "", baseUrl);
       parent.appendChild(el);
     } else if (part.type === "ask" && part.ask) {
       parent.appendChild(renderAskCardEl(part.ask));
@@ -1667,7 +1667,7 @@ export class ChatPanel {
     el.appendChild(header);
 
     // Content parts
-    renderContentParts(el, parsed.parts, msg.role);
+    renderContentParts(el, parsed.parts, msg.role, this.scope.connection.url);
 
     // Knowledge graph links
     if (parsed.links.length > 0) {
@@ -3103,7 +3103,7 @@ export class ChatPanel {
     if (header) this.streamingEl!.appendChild(header);
 
     const parsed = parseMessageContent(this.streamingText);
-    renderContentParts(this.streamingEl!, parsed.parts, "assistant");
+    renderContentParts(this.streamingEl!, parsed.parts, "assistant", this.scope.connection.url);
 
     // A group with a call still awaiting its result is "working": its header
     // shows that call's own description (or name + argument) with elapsed
@@ -3185,7 +3185,7 @@ export class ChatPanel {
       contentParent.innerHTML = "";
       if (header) contentParent.appendChild(header);
 
-      renderContentParts(contentParent, parsed.parts, "assistant");
+      renderContentParts(contentParent, parsed.parts, "assistant", this.scope.connection.url);
 
       if (parsed.links.length > 0) {
         const linksRow = document.createElement("div");
