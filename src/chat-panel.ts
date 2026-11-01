@@ -1303,6 +1303,21 @@ export class ChatPanel {
         fileInput.value = "";
       });
     }
+    // Image picker: same staging as a pasted image (preview chip, sent inline).
+    const imageBtn = this.root?.querySelector(".image-btn") as HTMLButtonElement | null;
+    if (imageBtn) {
+      const imageInput = document.createElement("input");
+      imageInput.type = "file";
+      imageInput.accept = "image/*";
+      imageInput.multiple = true;
+      imageInput.style.display = "none";
+      this.root?.appendChild(imageInput);
+      imageBtn.addEventListener("click", () => imageInput.click());
+      imageInput.addEventListener("change", () => {
+        if (imageInput.files) this.stageFiles(Array.from(imageInput.files));
+        imageInput.value = "";
+      });
+    }
 
     // Input area resize
     if (this.inputAreaHeight > 0) {
