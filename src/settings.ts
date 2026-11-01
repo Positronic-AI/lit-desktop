@@ -9,7 +9,7 @@ import {
   startOAuth, oauthStatus, submitOAuthCode, cancelOAuth,
   fetchFullAgents, getAgent, saveAgent, deleteAgent,
   fetchDefaultPrompt,
-  getConnections, saveConnection, removeConnection, hostFetch,
+  getConnections, saveConnection, removeConnection, hostFetch, fetchTeams, type TeamInfo,
   getActiveConnection, setActiveConnectionId,
   startDeviceAuth, pollDeviceToken, signedInUser, activeScope,
   type Credential, type Vendor, type CredMode, type FullAgent,
@@ -134,14 +134,29 @@ export function mountSettingsPanel(host: HTMLElement): void {
 // workspace's active connection, so you can configure any reachable node
 // without re-rooting your whole workspace. Default: Local (predictable).
 let setupConn: Connection | null = null;
+// On a multi-user server the credentials, agents and models live per TEAM (the
+// web app's Agents app is one per team), so the Setup chain for a remote
+// connection stands in one of that server's teams — the first by default, a
+// picker in the banner for the rest. The local box keeps its per-user root.
+let setupTeam: string | null = null;
+let setupTeams: TeamInfo[] = [];
 
 function setupScope(): Scope {
   const conn = setupConn
     ?? getConnections().find((c) => c.id === "local")
     ?? getActiveConnection();
-  // Team is a content namespace (channels/apps); nothing on the Setup chain is
-  // team-scoped, so the pool/credential calls use the per-user root ("local").
-  return { connection: conn, team: "local" };
+  if (conn.id === "local") return { connection: conn, team: "local" };
+  const first = setupTeams[0] ? (setupTeams[0].slug || setupTeams[0].name) : "local";
+  return { connection: conn, team: setupTeam || first };
+}
+
+/** The remote connection's teams, for the banner picker and the default scope. */
+function loadSetupTeams(): void {
+  const conn = setupScope().connection;
+  if (conn.id === "local") { setupTeams = []; return; }
+  fetchTeams({ connection: conn, team: "local" })
+    .then((list) => { setupTeams = list || []; if (bodyEl?.isConnected) renderSetup(); })
+    .catch(() => { setupTeams = []; });
 }
 
 function setupConnSelectable(c: Connection): boolean {
@@ -151,8 +166,11 @@ function setupConnSelectable(c: Connection): boolean {
 function selectSetupConn(c: Connection): void {
   if ((setupConn?.id ?? "local") === c.id) return;
   setupConn = c;
+  setupTeam = null;
+  setupTeams = [];
   poolCache = [];
   renderSetup();
+  loadSetupTeams();
 }
 
 type SettingsTab = "setup" | "mobile";
@@ -277,8 +295,31 @@ function renderSetup(): void {
   banner.append(
     el("span", "scope-banner-label", "Configuring "),
     el("span", "scope-banner-name", scopeConn.name),
+  );
+  if (scopeConn.id !== "local") {
+    // Team picker: a multi-user server keeps credentials, agents and models per team.
+    const teamSel = document.createElement("select");
+    teamSel.className = "settings-input";
+    teamSel.style.width = "auto";
+    teamSel.style.marginLeft = "8px";
+    const current = setupScope().team;
+    if (!setupTeams.length) {
+      const o = document.createElement("option"); o.value = current; o.textContent = current; teamSel.appendChild(o);
+    }
+    for (const t of setupTeams) {
+      const slug = t.slug || t.name;
+      const o = document.createElement("option");
+      o.value = slug; o.textContent = t.name || slug; o.selected = slug === current;
+      teamSel.appendChild(o);
+    }
+    teamSel.addEventListener("change", () => { setupTeam = teamSel.value; poolCache = []; renderSetup(); });
+    banner.append(el("span", "scope-banner-label", " · team "), teamSel);
+  }
+  banner.append(
     el("span", "scope-banner-note",
-      " — the credentials, models, and agents below live on this server. Select a connection above to configure a different one."),
+      scopeConn.id === "local"
+        ? " — the credentials, models, and agents below live on this computer. Select a connection above to configure a server."
+        : " — the credentials, models, and agents below live on this server, in that team. Select a connection above to configure a different one."),
   );
 
   // Sessions — one recovery action: end every live CLI session on this server
@@ -695,7 +736,7 @@ async function renderConnections(): Promise<void> {
   root.appendChild(el("div", "settings-loading", "Loading…"));
   let creds: Credential[] = [];
   try {
-    creds = await listCredentials("local", setupScope());
+    creds = await listCredentials(setupScope().team, setupScope());
   } catch (e) {
     root.innerHTML = "";
     root.appendChild(el("div", "settings-error", "Failed to load credentials."));
@@ -806,7 +847,7 @@ async function renderCredDetail(detail: HTMLElement, c: Credential): Promise<voi
     renameBtn.addEventListener("click", async () => {
       renameBtn.textContent = "…";
       try {
-        await updateCredential(c.id!, { name: nameInput.value.trim() }, "local", setupScope());
+        await updateCredential(c.id!, { name: nameInput.value.trim() }, setupScope().team, setupScope());
         c.name = nameInput.value.trim();
         renderConnections();
       } catch { renameBtn.textContent = "Failed"; }
@@ -851,7 +892,7 @@ async function renderCredDetail(detail: HTMLElement, c: Credential): Promise<voi
     const del = el("button", "settings-danger-link", "Delete credential");
     del.addEventListener("click", async () => {
       if (!confirm(`Delete credential "${c.name}"?`)) return;
-      try { await deleteCredential(c.id!, "local", setupScope()); renderConnections(); } catch {}
+      try { await deleteCredential(c.id!, setupScope().team, setupScope()); renderConnections(); } catch {}
     });
     detail.appendChild(del);
   }
@@ -929,12 +970,12 @@ function openCreateWizard(): void {
       go.setAttribute("disabled", "true");
       err.style.display = "none";
       try {
-        const cred = await createCredential({ id: slug(name), name, vendor: state.vendor!, mode: state.mode! }, "local", setupScope());
+        const cred = await createCredential({ id: slug(name), name, vendor: state.vendor!, mode: state.mode! }, setupScope().team, setupScope());
         // First-run funnel: with zero agents, the only sensible next step after
         // connecting is creating the agent — go straight to that form with the
         // fresh credential preselected instead of dropping back to Setup.
         const funnelToAgent = async () => {
-          const agents = await fetchFullAgents("local", setupScope()).catch(() => [] as FullAgent[]);
+          const agents = await fetchFullAgents(setupScope().team, setupScope()).catch(() => [] as FullAgent[]);
           if (agents.length === 0) {
             pendingAgentId = "new";
             pendingCredentialId = cred.id ?? null;
@@ -1139,7 +1180,7 @@ async function renderAgents(): Promise<void> {
   root.appendChild(el("div", "settings-loading", "Loading…"));
   let agents: FullAgent[] = [];
   try {
-    const [a, creds] = await Promise.all([fetchFullAgents("local", setupScope()), listCredentials("local", setupScope())]);
+    const [a, creds] = await Promise.all([fetchFullAgents(setupScope().team, setupScope()), listCredentials(setupScope().team, setupScope())]);
     agents = a;
     credCache = creds;
     if (!poolCache.length) await refreshPool();
