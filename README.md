@@ -30,6 +30,17 @@ that ships in the platform wheel — the desktop just freezes it.
 
 ## Dev workflow
 
+**Linux build prerequisites** (Tauri links against GTK 3 and WebKitGTK 4.1; a fresh
+Ubuntu 26.04 has none of the `-dev` packages and the link fails with a wall of
+`unable to find library -lgdk-3 … -lwebkit2gtk-4.1`, oum 2026-11-01):
+
+```bash
+sudo apt install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+    libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+```
+
+Check with `pkg-config --modversion webkit2gtk-4.1 gtk+-3.0` before `./start.sh`.
+
 ```bash
 ./start.sh          # clears stale processes, verifies port 1420 is free, launches
 ```
