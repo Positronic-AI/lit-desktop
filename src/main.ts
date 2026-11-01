@@ -560,6 +560,7 @@ registerPanel("search", () => {
           graphLoaded = true;
           graphDispose = mountGraphView(bodyFor("graph"), {
             channelId: cp.currentChannel!.id,
+            scope: cp.scope,
             jumpToMessage: (id?: string) => { void cp.jumpToMessage(id); },
             escapeHtml,
           });

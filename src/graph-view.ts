@@ -4,7 +4,7 @@
 // with a Back button (same model as the calendar).
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { fetchKnowledgeGraph, type GraphNode, type GraphEdge } from "./api";
+import { fetchKnowledgeGraph, type GraphNode, type GraphEdge, type Scope } from "./api";
 
 const TYPE_COLORS: Record<string, number> = {
   concepts: 0x7aa2f7, products: 0xf7768e, people: 0x9ece6a, patents: 0xe0af68,
@@ -15,6 +15,8 @@ const PROXIMITY_RADIUS = 30;
 
 export interface GraphContext {
   channelId: string;
+  /** The tab's own server + team — the app-active scope is another tab's. */
+  scope: Scope;
   jumpToMessage: (id?: string) => void;
   escapeHtml: (s: string) => string;
 }
@@ -125,7 +127,7 @@ export function mountGraphView(host: HTMLElement, ctx: GraphContext): () => void
     if (controls) controls.autoRotate = true;
   });
 
-  fetchKnowledgeGraph(ctx.channelId).then((raw) => {
+  fetchKnowledgeGraph(ctx.channelId, ctx.scope).then((raw) => {
     if (disposed) return;
     const { nodes, edges } = processData(raw);
     if (!nodes.length) { statusEl.textContent = "No graph data for this channel yet."; return; }

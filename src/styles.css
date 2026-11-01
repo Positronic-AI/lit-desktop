@@ -456,6 +456,22 @@ body {
   text-align: center;
 }
 
+/* A nested channel: indented under its parent, ↳ for the hash. */
+.channel-item.child {
+  padding-left: 34px;
+  margin-top: 0;
+}
+
+.channel-item.child .channel-icon {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.channel-item.child .channel-name {
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
 .channel-name {
   font-size: 13px;
   font-weight: 500;

@@ -2816,9 +2816,22 @@ export class ChatPanel {
     header.querySelector(".section-hide-btn")!.addEventListener("click", () => this.collapseSidebar());
     this.channelList.appendChild(header);
 
+    // Nesting (webapp parity): a child channel sits under its parent with a ↳,
+    // in the parent's slot; a child whose parent isn't listed stays top-level.
+    const ids = new Set(channels.map((c) => c.id));
+    const isChild = (c: Channel) => !!c.parentChannelId && ids.has(c.parentChannelId);
+    const ordered: Array<{ ch: Channel; child: boolean }> = [];
     for (const ch of channels) {
+      if (isChild(ch)) continue;
+      ordered.push({ ch, child: false });
+      for (const kid of channels) {
+        if (kid.parentChannelId === ch.id) ordered.push({ ch: kid, child: true });
+      }
+    }
+
+    for (const { ch, child } of ordered) {
       const item = document.createElement("div");
-      item.className = "channel-item";
+      item.className = child ? "channel-item child" : "channel-item";
       item.dataset.channelId = ch.id;
       if (this.currentChannel?.id === ch.id) item.classList.add("active");
 
@@ -2833,7 +2846,7 @@ export class ChatPanel {
       }
 
       const badge = hasUnread ? `<span class="unread-badge">${ch.unreadCount}</span>` : "";
-      item.innerHTML = `<span class="channel-icon">#</span><span class="channel-name">${escapeHtml(ch.name)}</span>${indicators}${badge}`;
+      item.innerHTML = `<span class="channel-icon">${child ? "&#8627;" : "#"}</span><span class="channel-name">${escapeHtml(ch.name)}</span>${indicators}${badge}`;
       item.addEventListener("click", () => this.openChannel(ch));
       this.channelList.appendChild(item);
     }

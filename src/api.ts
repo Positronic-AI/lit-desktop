@@ -21,6 +21,8 @@ export interface Channel {
   unreadCount: number;
   /** Absolute filesystem path for folder-backed channels. */
   folderPath?: string;
+  /** The channel this one nests under (the webapp's ↳ children). */
+  parentChannelId?: string;
   lastMessage?: {
     id: string;
     timestamp: string;
@@ -541,7 +543,7 @@ export async function fetchApps(scope: Scope = activeScope()): Promise<AppWidget
 
 export async function fetchChannels(scope: Scope = activeScope()): Promise<Channel[]> {
   const [nav, unread] = await Promise.all([
-    apiFetch<{ personal_channels: Array<{ id: string; name: string; folder_path?: string }> }>(`/navigation?team=${scope.team}`, undefined, scope),
+    apiFetch<{ personal_channels: Array<{ id: string; name: string; folder_path?: string; parent_channel_id?: string }> }>(`/navigation?team=${scope.team}`, undefined, scope),
     apiFetch<{ channels: Array<{ id: string; unreadCount: number }> }>("/channels/unread", undefined, scope).catch(() => ({ channels: [] })),
   ]);
 
@@ -551,6 +553,7 @@ export async function fetchChannels(scope: Scope = activeScope()): Promise<Chann
     name: ch.name,
     unreadCount: unreadMap.get(ch.id) || 0,
     folderPath: ch.folder_path,
+    parentChannelId: ch.parent_channel_id || undefined,
   }));
 }
 
