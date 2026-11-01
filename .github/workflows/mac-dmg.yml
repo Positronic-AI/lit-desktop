@@ -25,8 +25,8 @@ on:
 
 jobs:
   build-dmg:
-    # arm64 -> macos-latest (Apple Silicon); x64 -> macos-13 (Intel runner).
-    runs-on: ${{ inputs.arch == 'x64' && 'macos-13' || 'macos-latest' }}
+    # arm64 -> macos-latest (Apple Silicon); x64 -> macos-15-intel (macos-13 has no runners left, 2026-11-01).
+    runs-on: ${{ inputs.arch == 'x64' && 'macos-15-intel' || 'macos-latest' }}
     permissions:
       contents: write # to publish the release
     env:
