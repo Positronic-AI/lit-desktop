@@ -130,6 +130,9 @@ class NativeWebSocketShim {
         this.inner = ws;
         this.readyState = 1; // OPEN
         ws.addListener((msg: { type?: string; data?: unknown }) => {
+          // disconnect() is asynchronous: frames already in flight still
+          // arrive after close(). A closed shim delivers nothing.
+          if (this.closedLocally) return;
           if (msg.type === "Text" && typeof msg.data === "string") {
             this.onmessage?.({ data: msg.data });
           } else if (msg.type === "Close" || msg.type == null) {

@@ -1992,6 +1992,21 @@ export class ChatPanel {
     this.updateScrollButton();
   }
 
+  /** A remote workspace with no agents: the credential/agent setup lives on
+   *  that server, not in this app's Settings. */
+  private renderEmptyRemote(): void {
+    this.clearMessages();
+    const wrap = document.createElement("div");
+    wrap.className = "message system";
+    const content = document.createElement("div");
+    content.className = "message-content";
+    content.innerHTML =
+      `<p><strong>No agents in ${escapeHtml(this.scope.team)} on ${escapeHtml(this.scope.connection.name)} yet.</strong></p>` +
+      "<p>Agents for a workspace are set up on that server (Settings → Agents there). Open another workspace from the + menu.</p>";
+    wrap.appendChild(content);
+    this.messagesEl.appendChild(wrap);
+  }
+
   private renderOnboarding(): void {
     this.clearMessages();
     const wrap = document.createElement("div");
@@ -2573,9 +2588,15 @@ export class ChatPanel {
     }
   }
 
+  /** Per-channel memory of the chosen addressee (scope + channel). */
+  private agentMemoryKey(channelId: string): string {
+    return this.scopedKey(`lit-desktop-agent:${channelId}`);
+  }
+
   async selectAgent(agent: Agent): Promise<void> {
     this.currentAgent = agent;
     localStorage.setItem("lit-desktop-agent", agent.id);
+    if (this.currentChannel) localStorage.setItem(this.agentMemoryKey(this.currentChannel.id), agent.id);
     await this.loadAgentThrottle(agent);
     void this.checkAgentAuth();
     if (!this.usageReports[agent.id]) void this.refreshCurrentUsage();
@@ -2738,6 +2759,20 @@ export class ChatPanel {
 
   private async loadChannelAgent(channelId: string): Promise<void> {
     this.channelModelOverride = null;
+    // The web app shows the addressee you last chose in this channel (its own
+    // localStorage) over the record's binding; remember the same way so both
+    // clients open a channel on the same To: (2026-11-02: the record said
+    // chatgpt, the web said claude-rs, the desktop said chatgpt).
+    const remembered = this.agentMemoryKey(channelId) ? localStorage.getItem(this.agentMemoryKey(channelId)) : null;
+    const rememberedAgent = remembered ? this.agents.find((a) => a.id === remembered) : undefined;
+    if (rememberedAgent) {
+      this.currentAgent = rememberedAgent;
+      localStorage.setItem("lit-desktop-agent", rememberedAgent.id);
+      await this.loadChannelModelOverride(channelId, rememberedAgent.id);
+      this.renderAgentTabs();
+      this.renderAgentInfo();
+      return;
+    }
     let configRead = false;
     try {
       const config = await getChannelConfig(channelId, this.scope);
@@ -3017,6 +3052,13 @@ export class ChatPanel {
     this.channelWs.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        // This socket belongs to ONE channel. After a switch its close is
+        // asynchronous (the native shim disconnects once its connect settles),
+        // so frames can still land here — and they used to paint into whatever
+        // channel was on screen (2026-11-02, Windows: #lit-platform's live turn
+        // rendered under #test's history). Never render another channel's frames.
+        if (channelId !== this.currentChannel?.id) return;
+        if (typeof data.channel_id === "string" && data.channel_id && data.channel_id !== channelId) return;
 
         // Suppress an outbound (assistant) message that lands right after
         // stream_end — the live stream already rendered its content. Matches the
@@ -3085,7 +3127,7 @@ export class ChatPanel {
           markBusy(`stream:${channelId}`, `${this.currentChannel?.name || channelId} — agent is replying`);
           this.activeStreamId = data.stream_id || null;
           this.renderSidebarIndicators();
-          this.showTypingIndicator();
+          this.showTypingIndicator(data.agent_id);
           this.cancelStreamBtn.style.display = "";
         } else if (data.type === "stream_chunk" && data.content) {
           this.appendStreamToken(data.content);
@@ -3228,12 +3270,16 @@ export class ChatPanel {
 
   // --- Streaming ---
 
-  private showTypingIndicator(): void {
+  private showTypingIndicator(agentId?: string): void {
     this.removeTypingIndicator();
     this.streamingText = "";
     const el = document.createElement("div");
     el.className = "message assistant streaming";
-    const who = this.currentAgent?.name || "Agent";
+    // The bubble belongs to the agent whose turn this is (stream_start carries
+    // agent_id), not to whoever the composer is addressed to — the two differ
+    // the moment you switch To: while another agent is mid-reply (2026-11-02).
+    const streaming = agentId ? this.agents.find((a) => a.id === agentId) : undefined;
+    const who = streaming?.name || this.currentAgent?.name || "Agent";
     el.innerHTML = `<div class="message-header"><span class="message-author">${escapeHtml(who)}</span><span class="message-time">now</span><span class="header-spacer"></span></div><div class="message-content"><span class="typing-dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span></div>`;
     this.messagesEl.appendChild(el);
     this.observeForPin(el);
@@ -3817,7 +3863,8 @@ export class ChatPanel {
       this.renderSidebar(all);
 
       if (this.agents.length === 0) {
-        this.renderOnboarding();
+        if (this.scope.connection.id === "local") this.renderOnboarding();
+        else this.renderEmptyRemote();
         return;
       }
 

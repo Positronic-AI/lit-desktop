@@ -715,6 +715,10 @@ async function deviceSignIn(
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, Math.max(start.interval, 5) * 1000));
       if (await pollDeviceToken(conn, start.device_code)) {
+        // The place catalog (palette "Open workspace tab: …", starred places)
+        // skipped this connection at boot because it was signed out; tell the
+        // shell so its teams appear now, not after a restart (2026-11-02).
+        window.dispatchEvent(new CustomEvent("lit-connection-signed-in", { detail: { connectionId: conn.id } }));
         if (onSuccess) onSuccess();
         else renderServers();
         return;

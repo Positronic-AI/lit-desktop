@@ -17,6 +17,9 @@ on:
       version:
         description: "Version override (blank -> auto 2.0.<run number>)"
         default: ""
+      publish:
+        description: "Publish to the brand's rolling latest release (false = artifact only, for QA)"
+        default: "true"
 
 jobs:
   build-linux:
@@ -106,6 +109,7 @@ jobs:
       # litai -> Positronic-AI/lit-desktop-releases (RELEASES_TOKEN),
       # jovai -> automateix/jovai-desktop-releases (JOVAI_RELEASES_TOKEN).
       - name: Publish
+        if: ${{ inputs.publish != 'false' }}
         env:
           GH_TOKEN: ${{ inputs.brand == 'jovai' && secrets.JOVAI_RELEASES_TOKEN || secrets.RELEASES_TOKEN }}
         run: |

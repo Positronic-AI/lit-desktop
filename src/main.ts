@@ -122,6 +122,20 @@ function chatPanelMount(fixedId?: string) {
       const scope = conn
         ? { connection: conn, team: String(params.team || "local") }
         : activeScope();
+      if (conn && conn.id !== "local" && scope.team === "local") {
+        // A restored tab standing in "local" on a remote server (a layout
+        // saved before Settings learned teams, 2026-11-02): "local" is the
+        // laptop's own root, not one of the server's teams, so the tab showed
+        // the local onboarding card. Re-stand it in the server's first team.
+        void fetchTeams({ connection: conn, team: "local" })
+          .then((list) => {
+            const first = list?.[0];
+            if (!first) return;
+            wm.removePanel(panelId);
+            openChatTab(conn.id, first.slug || first.name);
+          })
+          .catch(() => { /* signed out or unreachable — the tab stays until the next boot */ });
+      }
       p = new ChatPanel(scope);
       wireChatHooks(p);
       chatPanels.set(panelId, p);
@@ -1196,6 +1210,9 @@ async function backendReachable(localScope: { connection: any; team: any }): Pro
 // connection. (The old teams rail is retired: switching teams = opening a
 // place tab; its jobs live in the command palette now.)
 const teamsByConn = new Map<string, TeamInfo[]>();
+
+// A connection signed in from Settings: its teams were skipped at boot.
+window.addEventListener("lit-connection-signed-in", () => refreshPlaceCatalog());
 
 function refreshPlaceCatalog(): void {
   for (const c of getConnections()) {
